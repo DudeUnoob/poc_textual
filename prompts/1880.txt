@@ -1,0 +1,26 @@
+This is a page from the 1880 U.S. Census population schedule.
+State: Texas, County: Bastrop.
+
+NOTE: 1880 is the FIRST census to include a "Relation to Head of House" column.
+      "Mulatto" is still a valid race category.
+
+For each numbered line, extract using EXACTLY these key names:
+
+  "Line Number"               integer
+  "Surname"                   string or null
+  "Given Name"                string or null
+  "Race"                      string — transcribe the letter/word as written. Ground
+                              truth for this decade contains White, Black, Mulatto,
+                              and Filipino.
+  "Gender"                    string (Male or Female)
+  "Age"                       integer or null
+  "Birth Month"               string or null
+  "Birth Year"                integer or null
+  "Relation to Head of House" string
+  "Birthplace"                string or null
+  "Father's Birthplace"       string or null
+  "Mother's Birthplace"       string or null
+  "Marital Status"            string or null
+  "Occupation"                string or null
+
+Return a JSON array.

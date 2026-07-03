@@ -1,0 +1,27 @@
+This is a page from the 1940 U.S. Census population schedule.
+State: Texas, County: Bastrop.
+
+For each numbered line, extract using EXACTLY these key names:
+
+  "Line Number"              integer
+  "Street Name"              string or null
+  "Surname"                  string or null
+  "Given Name"               string or null
+  "Relation to Head of House" string
+  "Gender"                   string (Male or Female)
+  "Race"                     string — transcribe the letter/word as written (e.g. "W", "Ne").
+                              Ground truth for this decade only contains White and
+                              Negro (Black) — do not expand, just transcribe the raw mark.
+  "Age"                      integer or null
+  "Estimated Birth Year"     integer or null
+  "Marital Status"           string or null
+  "Birthplace"               string or null
+  "Father's Birth Place"     string or null
+  "Mother's Birth Place"     string or null
+  "Occupation"               string or null
+  "Industry"                 string or null
+  "Worker Class"             string or null
+  "Weeks Worked"             integer or null
+  "Income"                   integer or null
+
+Return a JSON array.

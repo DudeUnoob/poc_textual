@@ -1,0 +1,29 @@
+This is a page from the 1910 U.S. Census population schedule.
+State: Texas, County: Bastrop.
+
+NOTE: "Mulatto" is still a valid race category in 1910.
+
+For each numbered line, extract using EXACTLY these key names:
+
+  "Line Number"                      integer
+  "Street Name"                      string or null
+  "Surname"                          string or null
+  "Given Name"                       string or null
+  "Relationship"                     string
+  "Gender"                           string (Male or Female)
+  "Race"                             string — transcribe the letter/word as written.
+                                      Ground truth for this decade contains White, Black,
+                                      Mulatto, Octoroon, Mexican (Latino), and Other --
+                                      "Octoroon" is a real category used in this decade's
+                                      data, don't discard it as an error if you see it.
+  "Age"                              integer or null
+  "Estimated Birth Year"             integer or null
+  "Marital Status"                   string or null
+  "Number of Years of Present Marriage" integer or null
+  "Birthplace"                       string or null
+  "Father's Birthplace"              string or null
+  "Mother's Birthplace"              string or null
+  "Occupation"                       string or null
+  "Industry"                         string or null
+
+Return a JSON array.

@@ -1,0 +1,25 @@
+This is a page from the 1920 U.S. Census population schedule.
+State: Texas, County: Bastrop.
+
+For each numbered line, extract using EXACTLY these key names:
+
+  "Line Number"           integer
+  "Surname"               string or null
+  "Given Name"            string or null
+  "Relationship"          string
+  "Home Free or Mortgaged" string or null
+  "Sex"                   string (Male or Female)
+  "Race"                  string — transcribe the letter/word as written. Ground truth
+                           for this decade contains White, Black, Mulatto, and
+                           Mexican (Latino) -- transcribe exactly what's on the form.
+  "Age"                   integer or null
+  "Estimated Birth Year"  integer or null
+  "Marital Status"        string or null
+  "Birthplace"            string or null
+  "Father's Birthplace"   string or null
+  "Mother's Birthplace"   string or null
+  "Citizenship"           string or null
+  "Occupation"            string or null
+  "Industry"              string or null
+
+Return a JSON array.

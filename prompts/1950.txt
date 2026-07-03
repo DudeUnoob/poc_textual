@@ -1,0 +1,31 @@
+This is a page from the 1950 U.S. Census of Population and Housing (Form P1).
+State: Texas, County: Bastrop. Enumeration District: {ED}.
+
+CRITICAL FORM LAYOUT — read carefully:
+- The printed LINE NUMBER (1–30) is in the far-left margin. Match each JSON record to THAT number exactly.
+- Column 1–2: Street / house number (street is often written once in the left margin for a block — copy it to every row in that block).
+- Column 3: Dwelling Number = "Serial number of dwelling unit" (small integer, often 1, 2, 3…). This is NOT the house number.
+- Column 7: Name = Surname and Given Name (read the handwriting in the Name column only).
+- Do NOT read names or data from the SAMPLE LINES section at the bottom into the main line 1–30 records.
+
+Extract MAIN RECORDS lines 1–30 only. Use EXACTLY these key names:
+
+  "Line Number"         integer (must match printed line on form)
+  "Street Name"         string or null
+  "House Number"        integer or null
+  "Dwelling Number"     integer or null
+  "Surname"             string or null
+  "Given Name"          string or null
+  "Relation to Head of House"  string
+  "Race"                string — literal mark on form (W, Neg, etc.)
+  "Gender"              string (Male or Female)
+  "Age"                 integer or null
+  "Marital Status"      string (Mar, Wd, D, Sep, S, Nev) or null
+  "Birth Place"         string or null
+  "Occupation"          string or null
+  "Industry"            string or null
+  "Worker Class"        string (P, G, O, NP) or null
+
+Return a JSON array of objects, one per line 1–30. Sample lines at bottom: use Line Number "S1", "S2" only if extracting those separately.
+
+NOTE: Ground truth "W0"/"WO" race sub-codes are NOT on the form — transcribe only what is written.

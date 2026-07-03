@@ -1,0 +1,37 @@
+This is a page from the 1900 U.S. Census population schedule.
+State: Texas, County: Bastrop.
+
+NOTE: 1900 records birth MONTH and YEAR separately instead of age.
+
+For each numbered line, extract using EXACTLY these key names:
+
+  "Line Number"                          integer
+  "Family Number"                        integer or null
+  "Street"                               string or null
+  "House Number"                         integer or null
+  "Number of Dwelling in Order of Visitation" integer or null
+  "Surname"                              string or null
+  "Given Name"                           string or null
+  "Relationship"                         string
+  "Race"                                 string — transcribe the letter/word as written.
+                                          Ground truth for this decade contains White,
+                                          Black, Mulatto, Chinese, and Mexican (Latino).
+  "Gender"                               string (Male or Female)
+  "Birth Month"                          string (Jan, Feb, Mar... Dec) or null
+  "Birth Year"                           integer or null
+  "Age"                                  integer or null
+  "Marital Status"                       string or null
+  "Years Married"                        integer or null
+  "Number of Children Born"              integer or null
+  "Number of Children Living"            integer or null
+  "Birthplace"                           string or null
+  "Father's Birthplace"                  string or null
+  "Mother's Birthplace"                  string or null
+  "Occupation"                           string or null
+  "Can Read"                             string (Y or N) or null
+  "Can Write"                            string (Y or N) or null
+  "Can Speak English"                    string (Y or N) or null
+  "House Owned or Rented"                string (Own or Rent) or null
+  "Farm or House"                        string (F or H) or null
+
+Return a JSON array.

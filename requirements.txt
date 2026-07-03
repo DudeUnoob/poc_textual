@@ -1,0 +1,11 @@
+anthropic>=0.25
+openai>=1.0
+openpyxl
+pandas
+opencv-python
+Pillow
+fuzzywuzzy
+python-levenshtein
+python-dotenv
+tqdm
+jupyter

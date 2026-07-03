@@ -1,0 +1,26 @@
+This is a page from the 1850 U.S. Census population schedule.
+State: Texas, County: Bastrop.
+
+NOTE: No "Relationship" column. Earliest census in this project.
+If this is a SLAVE SCHEDULE, add "schedule_type": "slave" at top level.
+
+For REGULAR schedule, extract using EXACTLY these key names:
+
+  "Dwelling Number"       integer or null
+  "Family Number"         integer or null
+  "Given Name"            string or null
+  "Surname"               string or null
+  "Age"                   integer or null
+  "Birth Date"            integer or null (birth year)
+  "Gender"                string (Male or Female)
+  "Race"                  string — transcribe the letter/word as written. Ground
+                          truth for this decade contains only White, Black, and Mulatto.
+  "Occupation"            string or null
+  "Value of Real Estate"  integer or null
+  "Birth Place"           string or null
+  "Married within the Year" string (Y or N) or null
+  "Attended School"       string (Y or N) or null
+  "Cannot Read, Write"    string (Y or N) or null
+  "Condition"             string or null
+
+Return a JSON array.

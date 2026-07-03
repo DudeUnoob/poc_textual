@@ -1,0 +1,34 @@
+This is a page from the 1860 U.S. Census population schedule.
+State: Texas, County: Bastrop.
+
+NOTE: No "Relationship" column, and NO "Line Number" column exists in this
+decade's ground truth at all (confirmed absent from all 17 sheets in the
+workbook) -- do not include a line_number field for 1860, it has no
+counterpart to compare against. Race values observed: White, Black, Mulatto,
+Indian (Native American).
+If this appears to be a SLAVE SCHEDULE (separate form listing enslaved people
+without names), add a top-level field "schedule_type": "slave" and use fields:
+age, sex, race, fugitive_from_state, deaf_dumb_blind_insane_idiotic.
+
+For REGULAR schedule, extract using EXACTLY these key names:
+
+  "Dwelling Number"          integer or null
+  "Family Number"            integer or null
+  "Given Name"               string or null
+  "Surname"                  string or null
+  "Age"                      integer or null
+  "Birth Year"               integer or null
+  "Gender"                   string (Male or Female)
+  "Race"                     string — transcribe the letter/word as written. Ground
+                             truth for this decade contains White, Black, Mulatto,
+                             and Indian (Native American).
+  "Occupation"               string or null
+  "Real Estate Value"        integer or null
+  "Personal Estate Value"    integer or null
+  "Birth Place"              string or null
+  "Married Within Year"      string (Y or N) or null
+  "Attended School"          string (Y or N) or null
+  "Cannot Read, Write"       string (Y or N) or null
+  "Disability Condition"     string or null
+
+Return a JSON array.
