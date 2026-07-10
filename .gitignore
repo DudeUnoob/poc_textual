@@ -4,7 +4,7 @@ __pycache__/
 *.py[cod]
 .env
 .DS_Store
-data/outputs/*
+
 !data/outputs/.gitkeep
 results/*
 !results/.gitkeep

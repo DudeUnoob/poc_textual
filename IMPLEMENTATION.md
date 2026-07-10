@@ -1,3 +1,51 @@
+# Implementation
+
+> **Architecture note (current): Gemini 3.1 Pro, API-only, no GPU.**
+>
+> The extraction backend was migrated from self-hosted Qwen2.5-VL (Colab GPU)
+> and the earlier Claude path to Google **Gemini 3.1 Pro** (`gemini-3.1-pro-preview`)
+> via the `google-genai` SDK. There is no GPU or model download; extraction is a
+> stateless API call authenticated with `GEMINI_API_KEY`.
+>
+> **Module map (see `src/`):**
+> - `models.py` - Pydantic contracts (`PersonRecord1950`, `ExtractionBatch`,
+>   `PageDiagnostics`) used as the Gemini `response_schema` and mapped to exact
+>   ground-truth column names via `FIELD_TO_GT_COLUMN_1950` / `to_gt_record`.
+> - `preprocess.py` - `prepare_full_page` (light CLAHE enhance, no binarization)
+>   and `make_row_block_crops` / `make_targeted_crop` (overlapping bands that keep
+>   the left-margin line numbers visible).
+> - `extract.py` - `get_client`, `call_gemini` (schema-constrained, deterministic,
+>   exponential-backoff retry), `extract_from_image` (full page + crops + retry),
+>   `process_sheet` (writes the canonical JSON envelope + diagnostics).
+> - `reconcile.py` - `reconcile_page` merges passes by line number, prefers the
+>   clearest/most-complete record, dedups, and runs one targeted retry for gaps.
+> - `compare.py` / `utils.py` / `validate.py` - model-agnostic comparison,
+>   normalization, and validation (unchanged in spirit; compare now also reports
+>   extraction coverage / missing-row rate / retry recovery).
+>
+> **Canonical commands:**
+> ```bash
+> cp .env.example .env            # set GEMINI_API_KEY
+> pip install -r requirements.txt
+> python src/extract.py data/raw_images/1950_11-1/sheet_01.jpg 1950 out.json
+> python src/compare.py --extracted out.json \
+>   --ground-truth "data/ground_truth/Bastrop County 1950 Clean.xlsx" \
+>   --sheet "Bastrop 11-1" --year 1950 --page 1
+> python scripts/run_11_1_batch.py
+> python -m pytest tests/ -q
+> ```
+>
+> **Cost / retries:** Gemini 3.1 Pro is roughly $2 / 1M input tokens and
+> $12 / 1M output tokens (<200k-token requests). Each page uses one full-page
+> call plus N crop calls (default 3) plus at most one targeted retry, so budget
+> ~4-5 calls per page. `call_gemini` retries transient API errors with
+> exponential backoff (`MAX_RETRIES_API`).
+>
+> The sections below are retained for historical context on the earlier
+> Claude/Qwen implementation and the data-quality investigation.
+
+---
+
 # Implementation Guide — Census OCR Pipeline
 
 ## Setup

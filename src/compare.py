@@ -38,11 +38,17 @@ STRATEGY_KEYWORDS = [
     (["gender", "sex"], "exact"),
     (["marital status"], "exact"),
     (["age"], "numeric"),
+    (["dwelling number", "house number"], "numeric"),
     (["surname", "given name", "first name", "last name"], "fuzzy_name"),
     (["relation"], "fuzzy"),
     (["birthplace", "birth place"], "fuzzy"),
     (["occupation", "industry"], "fuzzy"),
 ]
+
+# Threshold for the partial-credit "row_accuracy_at_80pct" metric: fraction of
+# compared fields that must match for a row to count, as an alternative to the
+# strict all-fields-must-match `row_accuracy`.
+ROW_ACCURACY_THRESHOLD = 0.8
 
 def classify_strategy(field_name: str) -> str:
     fl = field_name.lower()
@@ -122,6 +128,7 @@ def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
     with open(extracted_json) as f:
         data = json.load(f)
     records = data["records"]
+    extraction_diag = data.get("diagnostics", {})
 
     gt_df = load_ground_truth(gt_xlsx, gt_sheet)
 
@@ -165,6 +172,8 @@ def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
         ext_row = ext_by_line.get(line_num, {})
 
         row_result = {"line_number": line_num, "all_match": True, "fields": {}}
+        n_fields = 0
+        n_matched = 0
 
         for field in compare_columns:
             strategy = classify_strategy(field)
@@ -181,6 +190,13 @@ def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
                 priority_scores[field].append(matched)
             if not matched:
                 row_result["all_match"] = False
+            n_fields += 1
+            if matched:
+                n_matched += 1
+
+        row_result["fields_matched"] = n_matched
+        row_result["fields_total"] = n_fields
+        row_result["field_match_rate"] = n_matched / n_fields if n_fields else 1.0
 
         results.append(row_result)
 
@@ -193,6 +209,13 @@ def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
         "total_physical_pages_in_sheet": len(pages),
         "rows_compared": n,
         "row_accuracy": sum(r["all_match"] for r in results) / n if n else 0,
+        "avg_row_field_match_rate": (
+            sum(r["field_match_rate"] for r in results) / n if n else 0
+        ),
+        "row_accuracy_at_80pct": (
+            sum(1 for r in results if r["field_match_rate"] >= ROW_ACCURACY_THRESHOLD) / n
+            if n else 0
+        ),
         "field_accuracy": {
             f: (sum(scores) / len(scores) if scores else None)
             for f, scores in field_scores.items()
@@ -207,6 +230,18 @@ def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
     )
     metrics["fields_compared"] = compare_columns
 
+    # Extraction coverage diagnostics (from the Gemini pipeline, if present).
+    expected = extraction_diag.get("expected_lines") or []
+    missing = extraction_diag.get("missing_lines") or []
+    metrics["extraction_coverage"] = (
+        (len(expected) - len(missing)) / len(expected) if expected else None
+    )
+    metrics["missing_lines"] = missing
+    metrics["missing_row_rate"] = (len(missing) / len(expected)) if expected else None
+    metrics["retry_attempted"] = extraction_diag.get("retry_attempted", False)
+    metrics["retry_recovered_lines"] = extraction_diag.get("retry_recovered_lines", [])
+    metrics["illegible_lines"] = extraction_diag.get("illegible_lines", [])
+
     return metrics, results
 
 
@@ -217,10 +252,20 @@ def print_report(metrics: dict):
     print(f"{'='*55}")
     print(f"  Rows compared:          {metrics['rows_compared']}")
     print(f"  Row-level accuracy:     {metrics['row_accuracy']:.1%}")
+    print(f"  Avg per-row field match:  {metrics['avg_row_field_match_rate']:.1%}")
+    print(f"  Row accuracy @{ROW_ACCURACY_THRESHOLD:.0%} fields: {metrics['row_accuracy_at_80pct']:.1%}")
     print(f"  Overall field accuracy: {metrics['overall_field_accuracy']:.1%}")
     if metrics.get("priority_field_accuracy") is not None:
         print(f"  Priority field accuracy:  {metrics['priority_field_accuracy']:.1%}")
     print(f"  (Compared {len(metrics.get('fields_compared', []))} extracted fields)")
+    cov = metrics.get("extraction_coverage")
+    if cov is not None:
+        print(f"  Extraction coverage:    {cov:.1%}"
+              f"  (missing lines: {metrics.get('missing_lines') or 'none'})")
+        if metrics.get("retry_attempted"):
+            print(f"  Retry recovered lines:  {metrics.get('retry_recovered_lines') or 'none'}")
+        if metrics.get("illegible_lines"):
+            print(f"  Illegible lines:        {metrics.get('illegible_lines')}")
     print(f"\n  Field breakdown (worst → best, only fields with data):")
     scored = {k: v for k, v in metrics["field_accuracy"].items() if v is not None}
     for field, acc in sorted(scored.items(), key=lambda x: x[1]):
