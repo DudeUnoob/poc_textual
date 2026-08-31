@@ -56,6 +56,21 @@ def page_or_404(session: Session, page_id: int) -> Page:
     return page
 
 
+def render_row_crop(image_path: str, line: int, schema) -> bytes:
+    """Render browser-safe JPEG evidence even when the uploaded file is RGBA PNG data."""
+    with Image.open(image_path) as image:
+        width, height = image.size
+        top = schema.data_top + (schema.data_bottom - schema.data_top) * (line - 1) / schema.expected_lines
+        bottom = schema.data_top + (schema.data_bottom - schema.data_top) * line / schema.expected_lines
+        padding = int(height * 0.01)
+        crop = image.crop((0, max(0, int(height * top) - padding), width, min(height, int(height * bottom) + padding)))
+        if crop.mode != "RGB":
+            crop = crop.convert("RGB")
+        buffer = BytesIO()
+        crop.save(buffer, format="JPEG", quality=92)
+        return buffer.getvalue()
+
+
 @app.get("/")
 def dashboard(request: Request):
     with SessionLocal() as session:
@@ -227,15 +242,7 @@ def row_crop(page_id: int, line: int):
         schema = get_schema(page.batch.census_year)
         if not 1 <= line <= schema.expected_lines:
             raise HTTPException(status_code=400, detail="Line outside page layout")
-        with Image.open(page.stored_path) as image:
-            width, height = image.size
-            top = schema.data_top + (schema.data_bottom - schema.data_top) * (line - 1) / schema.expected_lines
-            bottom = schema.data_top + (schema.data_bottom - schema.data_top) * line / schema.expected_lines
-            padding = int(height * 0.01)
-            crop = image.crop((0, max(0, int(height * top) - padding), width, min(height, int(height * bottom) + padding)))
-            buffer = BytesIO()
-            crop.save(buffer, format="JPEG", quality=92)
-            return Response(buffer.getvalue(), media_type="image/jpeg")
+        return Response(render_row_crop(page.stored_path, line, schema), media_type="image/jpeg")
 
 
 @app.get("/review/next")

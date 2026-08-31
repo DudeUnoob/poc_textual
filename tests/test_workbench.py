@@ -140,3 +140,13 @@ def test_billing_failure_explains_required_user_action(tmp_path, monkeypatch):
     failure = classify_failure("429 RESOURCE_EXHAUSTED: prepayment credits are depleted")
     assert failure["kind"] == "billing"
     assert "Google AI Studio" in failure["action_required"]
+
+
+def test_row_crop_converts_rgba_upload_to_jpeg(tmp_path, monkeypatch):
+    _workbench(tmp_path, monkeypatch)
+    from workbench.schema import get_schema
+    from workbench.web import render_row_crop
+    image_path = tmp_path / "rgba-disguised-as-jpg.jpg"
+    Image.new("RGBA", (200, 300), (255, 255, 255, 180)).save(image_path, format="PNG")
+    crop = render_row_crop(str(image_path), 1, get_schema(1950))
+    assert crop[:2] == b"\xff\xd8"
