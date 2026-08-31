@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, joinedload
 
 from models import FIELD_TO_GT_COLUMN_1950
@@ -142,7 +142,9 @@ def persist_extraction(session: Session, run: ExtractionRun, page: Page, payload
     }
     for item in payload.get("field_candidates", []):
         line = int(item["line_number"])
-        warnings = list(item.get("reasons", [])) + warnings_by_line.get(line, [])
+        reasons = list(item.get("reasons", []))
+        validation_warnings = warnings_by_line.get(line, [])
+        warnings = reasons + validation_warnings
         can_auto_accept = (
             item.get("model_confidence") == "high"
             and item.get("row_legibility") == "clear"
@@ -159,7 +161,7 @@ def persist_extraction(session: Session, run: ExtractionRun, page: Page, payload
             normalized_value=_text_or_none(item.get("normalized_value")),
             model_confidence=item.get("model_confidence", "low"), source_pass=item.get("source_pass", "unknown"),
             row_legibility=item.get("row_legibility", "partial"), has_conflict=bool(item.get("conflict")),
-            reasons=item.get("reasons", []), validation_warnings=warnings, evidence=item.get("evidence", {}),
+            reasons=reasons, validation_warnings=validation_warnings, evidence=item.get("evidence", {}),
             priority=priority_for(item, warnings, year), status=status,
             auto_accepted=can_auto_accept, qc_sampled=sampled,
         ))
@@ -178,16 +180,25 @@ def latest_candidate_run_id_query(batch_id: int):
         .scalar_subquery())
 
 
-def queue_query(batch_id: int):
+def queue_query(batch_id: int, exclude_candidate_id: int | None = None):
     latest_run_id = latest_candidate_run_id_query(batch_id)
-    return (select(FieldCandidate)
+    query = (select(FieldCandidate)
         .join(Page)
         .where(
             Page.batch_id == batch_id,
             FieldCandidate.run_id == latest_run_id,
             FieldCandidate.status.in_(QUEUE_STATUSES),
         )
-        .order_by(FieldCandidate.priority, Page.page_number, FieldCandidate.line_number, FieldCandidate.field_name))
+        .order_by(
+            case((FieldCandidate.status == "deferred", 1), else_=0),
+            FieldCandidate.priority,
+            Page.page_number,
+            FieldCandidate.line_number,
+            FieldCandidate.field_name,
+        ))
+    if exclude_candidate_id is not None:
+        query = query.where(FieldCandidate.id != exclude_candidate_id)
+    return query
 
 
 def review_queue_count(session: Session, batch_id: int) -> int:

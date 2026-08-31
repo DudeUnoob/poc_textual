@@ -91,3 +91,42 @@
   .manifest-state { max-width: none; text-align: left; }
   [data-resume] { align-items: flex-start; flex-direction: column; }
 }
+.review-head { margin-top: 10px; }
+.review-head p { margin: 6px 0; color: var(--muted); }
+.review-layout { align-items: start; }
+.evidence { align-self: start; padding: 20px; }
+.evidence-heading, .decision-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.evidence-heading h2, .decision-heading h2 { margin: 2px 0 10px; }
+.evidence-heading > span { font-size: 12px; color: #b8c5cf; }
+.focus-frame, .row-frame { background: #080d11; border: 1px solid #33424d; border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.focus-frame { min-height: 150px; padding: 18px; }
+.field-crop { display: block; width: 100%; max-height: 180px; object-fit: contain; }
+.row-frame { margin-top: 9px; padding: 12px; }
+.row-crop { max-height: 110px; object-fit: contain; }
+.evidence summary { cursor: pointer; font-weight: 700; }
+.decision { position: sticky; top: 18px; }
+.decision-heading { border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+.confidence { font-size: 11px; text-transform: uppercase; font-weight: 800; padding: 4px 8px; border-radius: 999px; }
+.confidence-low { background: #fee2e2; color: #991b1b; }
+.confidence-medium { background: #fef3c7; color: #92400e; }
+.confidence-high { background: #d1fae5; color: #047857; }
+.rationale-field { border: 1px solid var(--line); border-radius: 7px; padding: 0; margin-top: 12px; }
+.rationale-field > summary { cursor: pointer; padding: 10px 11px; color: var(--muted); font-weight: 700; }
+.rationale-field label { padding: 0 10px 10px; }
+.decision-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.decision-actions button { gap: 8px; }
+.decision-actions kbd { font: 11px ui-monospace, SFMono-Regular, monospace; background: #ffffff33; border: 1px solid #ffffff55; border-radius: 4px; padding: 1px 5px; }
+.secondary kbd, .ghost kbd { background: #ffffffaa; border-color: #94a3b8; }
+.shortcut-help { font-size: 11px; color: var(--muted); margin-bottom: 0; }
+.line-context { margin-top: 20px; }
+.context-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.context-field { border: 1px solid var(--line); border-radius: 7px; padding: 9px 10px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.context-field span { color: var(--muted); font-size: 11px; }
+.context-field strong { overflow-wrap: anywhere; }
+.active-context { border-color: #5eead4; background: #edfdfa; }
+@media (max-width: 760px) {
+  .decision { position: static; }
+  .focus-frame { min-height: 120px; }
+  .context-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .decision-actions { grid-template-columns: 1fr; }
+}

@@ -83,6 +83,26 @@ def test_review_queue_uses_only_latest_run_with_candidates(tmp_path, monkeypatch
         assert review_queue_count(session, batch.id) == 1
 
 
+def test_review_queue_advances_past_skipped_and_deferred_fields(tmp_path, monkeypatch):
+    Batch, Page, SessionLocal, *_ = _workbench(tmp_path, monkeypatch)
+    from workbench.db import ExtractionRun, FieldCandidate
+    from workbench.services import queue_query
+    with SessionLocal() as session:
+        batch = Batch(name="B", county="Bastrop", state="Texas", census_year=1950, enumeration_district="11-1")
+        page = Page(batch=batch, original_filename="sheet_01.jpg", stored_path="/tmp/x.jpg", sha256="x", page_number=1, metadata_confirmed=True)
+        session.add(batch)
+        session.flush()
+        run = ExtractionRun(batch_id=batch.id, model="new")
+        session.add_all([page, run])
+        session.flush()
+        first = FieldCandidate(run_id=run.id, page=page, line_number=1, field_name="Surname", normalized_value="Deferred", model_confidence="low", source_pass="full_page", row_legibility="partial", status="deferred")
+        second = FieldCandidate(run_id=run.id, page=page, line_number=1, field_name="Given Name", normalized_value="Next", model_confidence="low", source_pass="full_page", row_legibility="partial")
+        session.add_all([first, second])
+        session.flush()
+        assert session.scalar(queue_query(batch.id)).id == second.id
+        assert session.scalar(queue_query(batch.id, exclude_candidate_id=second.id)).id == first.id
+
+
 def test_run_snapshot_exposes_queue_and_live_progress(tmp_path, monkeypatch):
     Batch, Page, SessionLocal, *_ = _workbench(tmp_path, monkeypatch)
     from workbench.db import ExtractionRun
@@ -159,3 +179,6 @@ def test_row_crop_converts_rgba_upload_to_jpeg(tmp_path, monkeypatch):
     Image.new("RGBA", (200, 300), (255, 255, 255, 180)).save(image_path, format="PNG")
     crop = render_row_crop(str(image_path), 1, get_schema(1950))
     assert crop[:2] == b"\xff\xd8"
+    focused = render_row_crop(str(image_path), 1, get_schema(1950), "Surname")
+    with Image.open(BytesIO(crop)) as row_image, Image.open(BytesIO(focused)) as focused_image:
+        assert focused_image.width < row_image.width

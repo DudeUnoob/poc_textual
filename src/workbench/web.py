@@ -56,14 +56,21 @@ def page_or_404(session: Session, page_id: int) -> Page:
     return page
 
 
-def render_row_crop(image_path: str, line: int, schema) -> bytes:
+def render_row_crop(image_path: str, line: int, schema, field: str | None = None) -> bytes:
     """Render browser-safe JPEG evidence even when the uploaded file is RGBA PNG data."""
     with Image.open(image_path) as image:
         width, height = image.size
         top = schema.data_top + (schema.data_bottom - schema.data_top) * (line - 1) / schema.expected_lines
         bottom = schema.data_top + (schema.data_bottom - schema.data_top) * line / schema.expected_lines
         padding = int(height * 0.01)
-        crop = image.crop((0, max(0, int(height * top) - padding), width, min(height, int(height * bottom) + padding)))
+        left, right = schema.field_bounds.get(field, (0.245, 0.775))
+        horizontal_padding = 0.012 if field else 0
+        crop = image.crop((
+            max(0, int(width * (left - horizontal_padding))),
+            max(0, int(height * top) - padding),
+            min(width, int(width * (right + horizontal_padding))),
+            min(height, int(height * bottom) + padding),
+        ))
         if crop.mode != "RGB":
             crop = crop.convert("RGB")
         buffer = BytesIO()
@@ -254,19 +261,19 @@ def full_image(page_id: int):
 
 
 @app.get("/pages/{page_id}/crop")
-def row_crop(page_id: int, line: int):
+def row_crop(page_id: int, line: int, field: str | None = None):
     with SessionLocal() as session:
         page = page_or_404(session, page_id)
         schema = get_schema(page.batch.census_year)
         if not 1 <= line <= schema.expected_lines:
             raise HTTPException(status_code=400, detail="Line outside page layout")
-        return Response(render_row_crop(page.stored_path, line, schema), media_type="image/jpeg")
+        return Response(render_row_crop(page.stored_path, line, schema, field), media_type="image/jpeg")
 
 
 @app.get("/review/next")
-def review_next(request: Request, batch_id: int):
+def review_next(request: Request, batch_id: int, skip: int | None = None):
     with SessionLocal() as session:
-        candidate = session.scalar(queue_query(batch_id).options(joinedload(FieldCandidate.page).joinedload(Page.batch)))
+        candidate = session.scalar(queue_query(batch_id, exclude_candidate_id=skip).options(joinedload(FieldCandidate.page).joinedload(Page.batch)))
         if not candidate:
             batch = session.get(Batch, batch_id)
             if not batch:
@@ -278,7 +285,8 @@ def review_next(request: Request, batch_id: int):
             FieldCandidate.line_number == candidate.line_number,
         ).order_by(FieldCandidate.field_name)).all()
         queue_count = review_queue_count(session, batch_id)
-        return TEMPLATES.TemplateResponse(request, "review.html", {"candidate": candidate, "page": candidate.page, "batch": candidate.page.batch, "line_fields": line_fields, "queue_count": queue_count})
+        review_reasons = list(dict.fromkeys([*candidate.reasons, *candidate.validation_warnings]))
+        return TEMPLATES.TemplateResponse(request, "review.html", {"candidate": candidate, "page": candidate.page, "batch": candidate.page.batch, "line_fields": line_fields, "queue_count": queue_count, "review_reasons": review_reasons})
 
 
 @app.post("/candidates/{candidate_id}/decision")
@@ -293,7 +301,8 @@ def decide(candidate_id: int, reviewer: str = Form(...), action: str = Form(...)
             raise HTTPException(status_code=400, detail=str(exc))
         batch_id = candidate.page.batch_id
         session.commit()
-        return RedirectResponse(f"/review/next?batch_id={batch_id}", status_code=303)
+        skip = f"&skip={candidate.id}" if action == "deferred" else ""
+        return RedirectResponse(f"/review/next?batch_id={batch_id}{skip}", status_code=303)
 
 
 @app.post("/batches/{batch_id}/exports")
