@@ -60,6 +60,29 @@ def test_review_decision_is_append_only(tmp_path, monkeypatch):
         assert len(candidate.decisions) == 2
 
 
+def test_review_queue_uses_only_latest_run_with_candidates(tmp_path, monkeypatch):
+    Batch, Page, SessionLocal, *_ = _workbench(tmp_path, monkeypatch)
+    from workbench.db import ExtractionRun, FieldCandidate
+    from workbench.services import queue_query, review_queue_count
+    with SessionLocal() as session:
+        batch = Batch(name="B", county="Bastrop", state="Texas", census_year=1950, enumeration_district="11-1")
+        page = Page(batch=batch, original_filename="sheet_01.jpg", stored_path="/tmp/x.jpg", sha256="x", page_number=1, metadata_confirmed=True)
+        session.add_all([batch, page])
+        session.flush()
+        old_run = ExtractionRun(batch_id=batch.id, model="old")
+        new_run = ExtractionRun(batch_id=batch.id, model="new")
+        session.add_all([old_run, new_run])
+        session.flush()
+        session.add_all([
+            FieldCandidate(run_id=old_run.id, page=page, line_number=1, field_name="Surname", normalized_value="Old", model_confidence="low", source_pass="full_page", row_legibility="partial"),
+            FieldCandidate(run_id=new_run.id, page=page, line_number=1, field_name="Surname", normalized_value="Current", model_confidence="low", source_pass="full_page", row_legibility="partial"),
+        ])
+        session.flush()
+        queued = session.scalars(queue_query(batch.id)).all()
+        assert [candidate.normalized_value for candidate in queued] == ["Current"]
+        assert review_queue_count(session, batch.id) == 1
+
+
 def test_run_snapshot_exposes_queue_and_live_progress(tmp_path, monkeypatch):
     Batch, Page, SessionLocal, *_ = _workbench(tmp_path, monkeypatch)
     from workbench.db import ExtractionRun

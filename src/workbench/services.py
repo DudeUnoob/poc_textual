@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from models import FIELD_TO_GT_COLUMN_1950
@@ -170,11 +170,28 @@ def _text_or_none(value) -> str | None:
     return None if value is None else str(value)
 
 
+def latest_candidate_run_id_query(batch_id: int):
+    """Return the newest extraction run that actually produced review data."""
+    return (select(func.max(FieldCandidate.run_id))
+        .join(Page, Page.id == FieldCandidate.page_id)
+        .where(Page.batch_id == batch_id)
+        .scalar_subquery())
+
+
 def queue_query(batch_id: int):
+    latest_run_id = latest_candidate_run_id_query(batch_id)
     return (select(FieldCandidate)
         .join(Page)
-        .where(Page.batch_id == batch_id, FieldCandidate.status.in_(QUEUE_STATUSES))
+        .where(
+            Page.batch_id == batch_id,
+            FieldCandidate.run_id == latest_run_id,
+            FieldCandidate.status.in_(QUEUE_STATUSES),
+        )
         .order_by(FieldCandidate.priority, Page.page_number, FieldCandidate.line_number, FieldCandidate.field_name))
+
+
+def review_queue_count(session: Session, batch_id: int) -> int:
+    return session.scalar(select(func.count()).select_from(queue_query(batch_id).subquery())) or 0
 
 
 def apply_decision(session: Session, candidate: FieldCandidate, reviewer: str, action: str,
@@ -211,6 +228,7 @@ def create_export(session: Session, batch: Batch) -> Export:
     version = (session.scalar(select(Export.version).where(Export.batch_id == batch.id).order_by(Export.version.desc())) or 0) + 1
     target = EXPORTS_DIR / f"batch_{batch.id}" / f"v{version:03d}"
     target.mkdir(parents=True, exist_ok=False)
+    latest_run_id = session.scalar(select(func.max(FieldCandidate.run_id)).join(Page).where(Page.batch_id == batch.id))
     pages = session.scalars(select(Page).where(Page.batch_id == batch.id).options(joinedload(Page.candidates).joinedload(FieldCandidate.decisions)).order_by(Page.page_number)).unique().all()
     rows: list[dict] = []
     audit: list[dict] = []
@@ -219,13 +237,14 @@ def create_export(session: Session, batch: Batch) -> Export:
         if page.kind != "census":
             continue
         by_line: dict[int, dict] = defaultdict(dict)
-        for candidate in sorted(page.candidates, key=lambda c: (c.line_number, c.field_name)):
+        current_candidates = (candidate for candidate in page.candidates if candidate.run_id == latest_run_id)
+        for candidate in sorted(current_candidates, key=lambda c: (c.line_number, c.field_name)):
             value = canonical_value(candidate)
             if candidate.status not in FINAL_STATUSES and candidate.status != "auto_accepted":
                 unresolved += 1
             by_line[candidate.line_number][candidate.field_name] = value
             audit.append({
-                "page_id": page.id, "page_number": page.page_number, "source_image": page.original_filename,
+                "run_id": candidate.run_id, "page_id": page.id, "page_number": page.page_number, "source_image": page.original_filename,
                 "line_number": candidate.line_number, "field": candidate.field_name,
                 "raw_value": candidate.raw_value, "ai_normalized_value": candidate.normalized_value,
                 "canonical_value": value, "status": candidate.status, "confidence": candidate.model_confidence,
@@ -241,7 +260,7 @@ def create_export(session: Session, batch: Batch) -> Export:
     pd.DataFrame(rows).to_csv(target / "reviewed_records.csv", index=False)
     pd.DataFrame(rows).to_excel(target / "reviewed_records.xlsx", index=False)
     (target / "reviewed_records.json").write_text(json.dumps(rows, indent=2, default=str))
-    summary = {"batch_id": batch.id, "version": version, "created_at": datetime.utcnow().isoformat(), "rows": len(rows), "unresolved_fields": unresolved, "schema_year": batch.census_year}
+    summary = {"batch_id": batch.id, "extraction_run_id": latest_run_id, "version": version, "created_at": datetime.utcnow().isoformat(), "rows": len(rows), "unresolved_fields": unresolved, "schema_year": batch.census_year}
     (target / "audit.json").write_text(json.dumps({"summary": summary, "fields": audit}, indent=2, default=str))
     export = Export(batch_id=batch.id, version=version, directory=str(target), summary=summary)
     session.add(export)

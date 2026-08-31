@@ -20,7 +20,7 @@ from .db import Batch, Export, ExtractionRun, FieldCandidate, Page, SessionLocal
 from .progress import now_iso, run_snapshot, update_progress
 from .schema import get_schema
 from .services import (apply_decision, batch_ready, create_export, import_files,
-                       queue_query, update_page_manifest)
+                       queue_query, review_queue_count, update_page_manifest)
 
 TEMPLATES = Jinja2Templates(directory=str(__file__.replace("web.py", "templates")))
 STATIC_DIR = __file__.replace("web.py", "static")
@@ -60,10 +60,7 @@ def page_or_404(session: Session, page_id: int) -> Page:
 def dashboard(request: Request):
     with SessionLocal() as session:
         batches = session.scalars(select(Batch).order_by(Batch.created_at.desc())).all()
-        counts = {
-            batch.id: session.scalar(select(func.count(FieldCandidate.id)).join(Page).where(Page.batch_id == batch.id, FieldCandidate.status.in_(["review_required", "sample_review", "deferred"]))) or 0
-            for batch in batches
-        }
+        counts = {batch.id: review_queue_count(session, batch.id) for batch in batches}
         return TEMPLATES.TemplateResponse(request, "dashboard.html", {"batches": batches, "counts": counts})
 
 
@@ -105,7 +102,7 @@ def batch_detail(request: Request, batch_id: int):
         ready, reason = batch_ready(batch)
         runs = session.scalars(select(ExtractionRun).where(ExtractionRun.batch_id == batch_id).order_by(ExtractionRun.created_at.desc())).all()
         run_snapshots = {run.id: run_snapshot(session, run) for run in runs}
-        queue_count = session.scalar(select(func.count(FieldCandidate.id)).join(Page).where(Page.batch_id == batch_id, FieldCandidate.status.in_(["review_required", "sample_review", "deferred"]))) or 0
+        queue_count = review_queue_count(session, batch_id)
         return TEMPLATES.TemplateResponse(request, "batch.html", {"batch": batch, "ready": ready, "reason": reason, "runs": runs, "run_snapshots": run_snapshots, "queue_count": queue_count})
 
 
@@ -250,8 +247,13 @@ def review_next(request: Request, batch_id: int):
             if not batch:
                 raise HTTPException(status_code=404, detail="Batch not found")
             return TEMPLATES.TemplateResponse(request, "queue_empty.html", {"batch": batch})
-        line_fields = session.scalars(select(FieldCandidate).where(FieldCandidate.page_id == candidate.page_id, FieldCandidate.line_number == candidate.line_number).order_by(FieldCandidate.field_name)).all()
-        return TEMPLATES.TemplateResponse(request, "review.html", {"candidate": candidate, "page": candidate.page, "batch": candidate.page.batch, "line_fields": line_fields})
+        line_fields = session.scalars(select(FieldCandidate).where(
+            FieldCandidate.run_id == candidate.run_id,
+            FieldCandidate.page_id == candidate.page_id,
+            FieldCandidate.line_number == candidate.line_number,
+        ).order_by(FieldCandidate.field_name)).all()
+        queue_count = review_queue_count(session, batch_id)
+        return TEMPLATES.TemplateResponse(request, "review.html", {"candidate": candidate, "page": candidate.page, "batch": candidate.page.batch, "line_fields": line_fields, "queue_count": queue_count})
 
 
 @app.post("/candidates/{candidate_id}/decision")
