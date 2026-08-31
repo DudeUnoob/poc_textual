@@ -1,0 +1,9 @@
+.git
+venv
+__pycache__
+.pytest_cache
+data/ground_truth
+data/raw_images
+data/outputs
+data/workbench
+results

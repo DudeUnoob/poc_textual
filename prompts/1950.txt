@@ -26,6 +26,12 @@ Extract MAIN RECORDS lines 1–30 only. Use EXACTLY these key names:
   "Industry"            string or null
   "Worker Class"        string (P, G, O, NP) or null
 
-Return a JSON array of objects, one per line 1–30. Sample lines at bottom: use Line Number "S1", "S2" only if extracting those separately.
+For every non-blank extracted field, also populate the schema's `field_confidence`
+object using the snake_case field name and one of `high`, `medium`, or `low`.
+Use `high` only for unambiguous handwriting. Do not use confidence to hide a
+guess: use `low` and preserve the best literal transcription.
+
+Return records through the requested JSON schema, one per line 1–30. Sample
+lines at bottom: use Line Number "S1", "S2" only if extracting those separately.
 
 NOTE: Ground truth "W0"/"WO" race sub-codes are NOT on the form — transcribe only what is written.

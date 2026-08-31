@@ -1,0 +1,48 @@
+.run-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding: 0;
+}
+.run-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 17px;
+  background: #fbfdff;
+}
+.run-title, .progress-caption {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.run-title > div { display: flex; gap: 10px; align-items: baseline; }
+.run-status {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  font-weight: 800;
+  background: #e2e8f0;
+  padding: 4px 9px;
+  border-radius: 999px;
+}
+.run-card[data-status="running"] .run-status { background: #dbeafe; color: #1d4ed8; }
+.run-card[data-status="completed"] .run-status { background: #d1fae5; color: #047857; }
+.run-card[data-status="failed"] .run-status { background: #fee2e2; color: #b91c1c; }
+.run-message { font-weight: 650; margin: 12px 0 8px; }
+.progress-track { height: 11px; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
+.progress-track span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #0f766e, #14b8a6);
+  transition: width .35s ease;
+}
+.progress-caption { font-size: 12px; margin-top: 5px; color: var(--muted); }
+.run-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin: 15px 0; }
+.run-metrics div { background: white; border: 1px solid #e6eaf0; border-radius: 7px; padding: 8px; }
+.run-metrics span, .run-meta { display: block; color: var(--muted); font-size: 11px; }
+.run-metrics strong { display: block; margin-top: 2px; font-size: 13px; overflow-wrap: anywhere; }
+.event-log ol { margin: 8px 0; padding-left: 22px; color: var(--muted); font-size: 12px; }
+.run-error pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #fff1f2; color: #9f1239; padding: 10px; border-radius: 6px; }
+.action-required { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; border-radius: 7px; padding: 10px; font-weight: 650; }
+@media (max-width: 760px) { .run-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -131,6 +131,58 @@ network is needed.
 
 ---
 
+## Human Review Workbench (v3)
+
+The local workbench turns a Gemini draft into a field-level review queue. It
+keeps the original scan, extraction run, confidence evidence, reviewer decision
+history, and a versioned export separate from the supplied clean workbooks.
+
+```bash
+# One-time setup
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+export GEMINI_API_KEY=...
+
+# Terminal 1: browser application
+PYTHONPATH=src uvicorn workbench.web:app --reload
+
+# Terminal 2: durable local extraction worker
+PYTHONPATH=src python -m workbench.worker
+```
+
+Open http://127.0.0.1:8000, import a folder of 1950 images, confirm each page's
+physical order/type, and queue a run. The worker processes only confirmed census
+pages. Reviewers are required to enter a name or initials; every decision is
+append-only. Exports are written under `data/workbench/exports/` as CSV, XLSX,
+JSON, and an audit log.
+
+Each run card updates live with queue position, completed/current page, extraction
+pass, API attempt, retry count, elapsed step time, prepared review fields, and a
+recent event log. Every completed page is committed as a checkpoint. If an API
+call exhausts its three automatic retries, the run pauses with its exact error and
+a resume action; if the worker restarts, interrupted runs are automatically
+re-queued and continue from the first unfinished page.
+
+For reproducible local startup, place `GEMINI_API_KEY` in `.env` and run:
+
+```bash
+docker compose up --build
+```
+
+Before high-confidence fields can be auto-accepted, calibrate an extraction on
+held-out cleaned pages. The gate requires at least 30 observations and measured
+precision of 98% or more for a field/confidence band; until then every field
+remains reviewable.
+
+```bash
+PYTHONPATH=src python -m workbench.calibrate \
+  --extracted data/outputs/1950_11-1/sheet_01_extracted.json \
+  --ground-truth "data/ground_truth/Bastrop County 1950 Clean.xlsx" \
+  --sheet "Bastrop 11-1" --page 1 --year 1950
+```
+
+---
+
 ## Contact
 
 Damodar — SDE Intern, UT Austin IRP  

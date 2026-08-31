@@ -1,0 +1,19 @@
+services:
+  web:
+    build: .
+    command: uvicorn workbench.web:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      WORKBENCH_DATA_DIR: /app/data/workbench
+    volumes:
+      - ./data/workbench:/app/data/workbench
+  worker:
+    build: .
+    command: python -m workbench.worker
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      WORKBENCH_DATA_DIR: /app/data/workbench
+    volumes:
+      - ./data/workbench:/app/data/workbench

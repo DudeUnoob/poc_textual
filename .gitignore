@@ -10,3 +10,4 @@ results/*
 !results/.gitkeep
 *.egg-info/
 .ipynb_checkpoints/
+data/workbench/

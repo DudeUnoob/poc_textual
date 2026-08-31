@@ -111,6 +111,7 @@ def reconcile_page(
             retry_records = retry_fn(missing)
         except Exception:
             retry_records = []
+        per_source["retry"] = retry_records
         for rec in retry_records:
             ln = rec.line_number
             if ln is None or ln not in valid_range:
@@ -128,6 +129,24 @@ def reconcile_page(
         ln for ln, (rec, _) in best.items() if rec.legibility == Legibility.illegible
     )
 
+    # Keep provenance and disagreements for the review workbench.  We do not
+    # discard disagreement merely because reconciliation picked a winner.
+    diagnostics.line_sources = {str(ln): source for ln, (_, source) in best.items()}
+    conflict_fields: dict[str, list[str]] = {}
+    for ln, sources in seen_in.items():
+        values_by_field: dict[str, set[str]] = {}
+        for records in per_source.values():
+            for rec in records:
+                if rec.line_number != ln:
+                    continue
+                for field, value in rec.model_dump().items():
+                    if field in {"line_number", "legibility", "field_confidence"} or value is None:
+                        continue
+                    values_by_field.setdefault(field, set()).add(str(value).strip().casefold())
+        conflicts = sorted(field for field, values in values_by_field.items() if len(values) > 1)
+        if conflicts:
+            conflict_fields[str(ln)] = conflicts
+    diagnostics.conflict_fields_by_line = conflict_fields
     diagnostics.extracted_lines = sorted(best.keys())
     diagnostics.missing_lines = missing
     diagnostics.duplicate_lines = duplicates

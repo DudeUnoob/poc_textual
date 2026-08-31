@@ -56,11 +56,56 @@ def test_call_gemini_retries_then_succeeds(monkeypatch):
     assert client.models.calls == 2
 
 
+def test_call_gemini_reports_attempt_retry_and_success(monkeypatch):
+    monkeypatch.setattr(extract.time, "sleep", lambda *_: None)
+    batch = ExtractionBatch(records=[PersonRecord1950(line_number=1)])
+    client = _Client([RuntimeError("temporary 429"), _Resp(parsed=batch)])
+    events = []
+    extract.call_gemini(
+        client, "m", "sys", "usr", b"img", "image/jpeg",
+        event_callback=events.append, source_label="crop_1",
+    )
+    assert [event["type"] for event in events] == [
+        "api_attempt", "api_error", "api_attempt", "api_success",
+    ]
+    assert events[1]["retry_in_seconds"] == 2
+    assert events[-1]["source"] == "crop_1"
+
+
+def test_call_gemini_does_not_report_success_before_json_validation(monkeypatch):
+    monkeypatch.setattr(extract.time, "sleep", lambda *_: None)
+    batch = ExtractionBatch(records=[PersonRecord1950(line_number=1)])
+    client = _Client([_Resp(parsed=None, text="{truncated"), _Resp(parsed=batch)])
+    events = []
+    extract.call_gemini(
+        client, "m", "sys", "usr", b"img", "image/jpeg",
+        event_callback=events.append,
+    )
+    assert [event["type"] for event in events] == [
+        "api_attempt", "api_error", "api_attempt", "api_success",
+    ]
+    assert events[1]["next_max_output_tokens"] == extract.DEFAULT_MAX_OUTPUT_TOKENS * 2
+    assert events[2]["max_output_tokens"] == extract.DEFAULT_MAX_OUTPUT_TOKENS * 2
+
+
 def test_call_gemini_raises_after_max_retries(monkeypatch):
     monkeypatch.setattr(extract.time, "sleep", lambda *_: None)
     client = _Client([RuntimeError("boom")] * extract.MAX_RETRIES_API)
     with pytest.raises(RuntimeError):
         extract.call_gemini(client, "m", "sys", "usr", b"img", "image/jpeg")
+
+
+def test_call_gemini_does_not_retry_billing_or_credential_failures(monkeypatch):
+    monkeypatch.setattr(extract.time, "sleep", lambda *_: None)
+    client = _Client([RuntimeError("429: prepayment credits are depleted")])
+    events = []
+    with pytest.raises(RuntimeError, match="after 1 attempt"):
+        extract.call_gemini(
+            client, "m", "sys", "usr", b"img", "image/jpeg",
+            event_callback=events.append,
+        )
+    assert client.models.calls == 1
+    assert events[-1]["retry_in_seconds"] is None
 
 
 def test_post_process_normalizes_and_propagates_dittos():
@@ -174,3 +219,24 @@ def test_extract_from_image_caps_clusters_at_n_blocks(monkeypatch):
     extract.extract_from_image("sheet.jpg", 1950, client=client, expected_lines=30, n_blocks=3)
     crop_calls = [label for label in calls if label.startswith("crop_")]
     assert len(crop_calls) <= 3
+
+
+def test_review_sidecar_preserves_raw_value_confidence_and_conflict():
+    person = PersonRecord1950(
+        line_number=1, surname="Wite", race="W",
+        field_confidence={"surname": "low", "race": "high"},
+    )
+    candidates = extract._review_candidates(
+        [person],
+        [{"Line Number": 1, "Surname": "Wite", "Race": "W"}],
+        [{"Line Number": 1, "Surname": "Wite", "Race": "White"}],
+        {"line_sources": {"1": "crop_1"}, "conflict_fields_by_line": {"1": ["surname"]}},
+        expected_lines=30,
+    )
+    surname = next(item for item in candidates if item["field"] == "Surname")
+    race = next(item for item in candidates if item["field"] == "Race")
+    assert surname["raw_value"] == "Wite"
+    assert surname["model_confidence"] == "low"
+    assert surname["conflict"] is True
+    assert race["normalized_value"] == "White"
+    assert race["source_pass"] == "crop_1"

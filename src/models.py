@@ -32,6 +32,38 @@ class Legibility(str, Enum):
     illegible = "illegible"
 
 
+class FieldConfidence(str, Enum):
+    """Self-reported certainty for one value, kept separate from legibility."""
+
+    high = "high"
+    medium = "medium"
+    low = "low"
+
+
+class FieldConfidence1950(BaseModel):
+    """Fixed-shape confidence object accepted by the Gemini Developer API.
+
+    A ``dict[str, FieldConfidence]`` becomes JSON Schema
+    ``additionalProperties``, which is unsupported by the Developer API.
+    Keep these names aligned with ``PersonRecord1950``.
+    """
+
+    street_name: FieldConfidence | None = None
+    house_number: FieldConfidence | None = None
+    dwelling_number: FieldConfidence | None = None
+    surname: FieldConfidence | None = None
+    given_name: FieldConfidence | None = None
+    relation_to_head: FieldConfidence | None = None
+    race: FieldConfidence | None = None
+    gender: FieldConfidence | None = None
+    age: FieldConfidence | None = None
+    marital_status: FieldConfidence | None = None
+    birth_place: FieldConfidence | None = None
+    occupation: FieldConfidence | None = None
+    industry: FieldConfidence | None = None
+    worker_class: FieldConfidence | None = None
+
+
 class PersonRecord1950(BaseModel):
     """One line (person) on a 1950 Form P1 population schedule.
 
@@ -61,6 +93,15 @@ class PersonRecord1950(BaseModel):
     legibility: Legibility = Field(
         default=Legibility.clear,
         description="clear if confidently read; partial if some fields guessed; illegible if the line could not be read.",
+    )
+    field_confidence: FieldConfidence1950 = Field(
+        default_factory=FieldConfidence1950,
+        description=(
+            "Per-field confidence using the fixed schema field names. Include "
+            "every non-blank field: high only when "
+            "the handwriting is unambiguous, medium for a plausible read, low "
+            "for a guess."
+        ),
     )
 
 
@@ -114,6 +155,8 @@ class PageDiagnostics(BaseModel):
     retry_attempted: bool = False
     retry_recovered_lines: list[int] = Field(default_factory=list)
     crops_used: int = 1
+    line_sources: dict[str, str] = Field(default_factory=dict)
+    conflict_fields_by_line: dict[str, list[str]] = Field(default_factory=dict)
 
     @property
     def coverage(self) -> float:
