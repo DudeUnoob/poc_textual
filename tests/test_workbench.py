@@ -63,7 +63,7 @@ def test_review_decision_is_append_only(tmp_path, monkeypatch):
 def test_review_queue_uses_only_latest_run_with_candidates(tmp_path, monkeypatch):
     Batch, Page, SessionLocal, *_ = _workbench(tmp_path, monkeypatch)
     from workbench.db import ExtractionRun, FieldCandidate
-    from workbench.services import queue_query, review_queue_count
+    from workbench.services import queue_query, review_queue_count, review_row_count
     with SessionLocal() as session:
         batch = Batch(name="B", county="Bastrop", state="Texas", census_year=1950, enumeration_district="11-1")
         page = Page(batch=batch, original_filename="sheet_01.jpg", stored_path="/tmp/x.jpg", sha256="x", page_number=1, metadata_confirmed=True)
@@ -81,6 +81,56 @@ def test_review_queue_uses_only_latest_run_with_candidates(tmp_path, monkeypatch
         queued = session.scalars(queue_query(batch.id)).all()
         assert [candidate.normalized_value for candidate in queued] == ["Current"]
         assert review_queue_count(session, batch.id) == 1
+        assert review_row_count(session, batch.id) == 1
+
+
+def test_review_row_count_groups_multiple_fields_for_one_person(tmp_path, monkeypatch):
+    Batch, Page, SessionLocal, *_ = _workbench(tmp_path, monkeypatch)
+    from workbench.db import ExtractionRun, FieldCandidate
+    from workbench.services import review_queue_count, review_row_count
+    with SessionLocal() as session:
+        batch = Batch(name="B", county="Bastrop", state="Texas", census_year=1950, enumeration_district="11-1")
+        page = Page(batch=batch, original_filename="sheet_01.jpg", stored_path="/tmp/x.jpg", sha256="x", page_number=1, metadata_confirmed=True)
+        run = ExtractionRun(batch_id=1, model="new")
+        session.add_all([batch, page])
+        session.flush()
+        run.batch_id = batch.id
+        session.add(run)
+        session.flush()
+        session.add_all([
+            FieldCandidate(run_id=run.id, page=page, line_number=1, field_name="Surname", model_confidence="low", source_pass="crop_1", row_legibility="partial"),
+            FieldCandidate(run_id=run.id, page=page, line_number=1, field_name="Given Name", model_confidence="low", source_pass="crop_1", row_legibility="partial"),
+            FieldCandidate(run_id=run.id, page=page, line_number=2, field_name="Race", model_confidence="low", source_pass="crop_1", row_legibility="partial"),
+        ])
+        session.flush()
+        assert review_queue_count(session, batch.id) == 3
+        assert review_row_count(session, batch.id) == 2
+
+
+def test_reclassify_run_excludes_calibration_page(tmp_path, monkeypatch):
+    Batch, Page, SessionLocal, *_ = _workbench(tmp_path, monkeypatch)
+    from workbench import services
+    from workbench.db import CalibrationBand, ExtractionRun, FieldCandidate
+    monkeypatch.setattr(services, "deterministic_sample", lambda *args: False)
+    with SessionLocal() as session:
+        batch = Batch(name="B", county="Bastrop", state="Texas", census_year=1950, enumeration_district="11-1")
+        page1 = Page(batch=batch, original_filename="1.jpg", stored_path="/tmp/1.jpg", sha256="1", page_number=1, metadata_confirmed=True)
+        page2 = Page(batch=batch, original_filename="2.jpg", stored_path="/tmp/2.jpg", sha256="2", page_number=2, metadata_confirmed=True)
+        session.add_all([batch, page1, page2])
+        session.flush()
+        run = ExtractionRun(batch_id=batch.id, model="gemini-3.5-flash")
+        band = CalibrationBand(census_year=1950, field_name="Birth Place", confidence="high", total=30, correct=30)
+        session.add_all([run, band])
+        session.flush()
+        candidates = [
+            FieldCandidate(run_id=run.id, page=page, line_number=1, field_name="Birth Place", normalized_value="Texas", raw_value="Tex", model_confidence="high", source_pass="crop_1", row_legibility="clear", reasons=[], validation_warnings=[])
+            for page in (page1, page2)
+        ]
+        session.add_all(candidates)
+        session.flush()
+        services.reclassify_run_candidates(session, run.id, exclude_page_ids={page1.id})
+        assert candidates[0].status == "review_required"
+        assert candidates[1].status == "auto_accepted"
 
 
 def test_review_queue_advances_past_skipped_and_deferred_fields(tmp_path, monkeypatch):
@@ -169,6 +219,16 @@ def test_billing_failure_explains_required_user_action(tmp_path, monkeypatch):
     failure = classify_failure("429 RESOURCE_EXHAUSTED: prepayment credits are depleted")
     assert failure["kind"] == "billing"
     assert "Google AI Studio" in failure["action_required"]
+
+
+def test_new_calibration_band_counter_starts_from_zero(tmp_path, monkeypatch):
+    _workbench(tmp_path, monkeypatch)
+    from workbench.db import CalibrationBand
+    band = CalibrationBand(census_year=1950, field_name="Race", confidence="high")
+    matches = [True, True, False]
+    band.total = (band.total or 0) + len(matches)
+    band.correct = (band.correct or 0) + sum(matches)
+    assert (band.total, band.correct) == (3, 2)
 
 
 def test_row_crop_converts_rgba_upload_to_jpeg(tmp_path, monkeypatch):

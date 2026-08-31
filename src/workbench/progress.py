@@ -44,6 +44,12 @@ def run_snapshot(session: Session, run: ExtractionRun) -> dict:
     review_items = session.scalar(
         select(func.count(FieldCandidate.id)).where(FieldCandidate.run_id == run.id)
     ) or 0
+    review_rows = session.scalar(select(func.count()).select_from(
+        select(FieldCandidate.page_id, FieldCandidate.line_number)
+        .where(FieldCandidate.run_id == run.id)
+        .group_by(FieldCandidate.page_id, FieldCandidate.line_number)
+        .subquery()
+    )) or 0
     queue_position = None
     if run.status == "queued":
         queue_position = 1 + (session.scalar(
@@ -87,6 +93,7 @@ def run_snapshot(session: Session, run: ExtractionRun) -> dict:
         "job_attempt": int(progress.get("job_attempt") or 0),
         "queue_position": queue_position,
         "review_items": review_items,
+        "review_rows": review_rows,
         "last_update": last_update,
         "server_time": now_iso(),
         "step_elapsed_seconds": step_elapsed_seconds,
@@ -147,6 +154,8 @@ def _default_message(status: str, queue_position: int | None) -> str:
         return f"Waiting for the worker (queue position {queue_position or 1})"
     if status == "running":
         return "Extraction is running"
+    if status == "cancel_requested":
+        return "Finishing the current API call, then switching to fast extraction"
     if status == "completed":
         return "Extraction completed"
     if status == "failed":

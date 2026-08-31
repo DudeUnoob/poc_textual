@@ -62,7 +62,8 @@ def normalize_race(raw: str, year: int) -> str:
     if not raw: return raw
     raw = raw.strip()
     decade_map = RACE_NORMALIZE_MAP.get(year, {})
-    if raw in decade_map: return decade_map[raw]
+    normalized_codes = {key.casefold(): value for key, value in decade_map.items()}
+    if raw.casefold() in normalized_codes: return normalized_codes[raw.casefold()]
     for v in VALID_RACE.get(year, []):
         if raw.lower() == v.lower(): return v
     return raw

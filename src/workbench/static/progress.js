@@ -16,7 +16,7 @@ document.querySelectorAll("[data-run-id]").forEach((card) => {
     setText("[data-percent]", `${data.percent}%`);
     setText("[data-retries]", data.retry_count);
     setText("[data-attempt]", data.job_attempt || 1);
-    setText("[data-review-items]", data.review_items);
+    setText("[data-review-items]", data.review_rows);
     setText("[data-current-page]", data.current_page ? `Page ${data.current_page}: ${data.current_filename || ""}` : "—");
     setText("[data-current-pass]", data.current_pass ? data.current_pass.replaceAll("_", " ") : "—");
     setText("[data-api-attempt]", data.api_attempt ? `${data.api_attempt}/${data.max_api_attempts}` : "—");

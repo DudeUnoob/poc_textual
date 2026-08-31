@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Review line {{ line_number }} · Workbench{% endblock %}
+{% block content %}
+<a class="back" href="/batches/{{ batch.id }}">← {{ batch.name }}</a>
+<div class="review-head">
+  <div>
+    <span class="eyebrow">Page {{ page.page_number }} · Line {{ line_number }}</span>
+    <h1>Review this person once.</h1>
+    <p><strong>{{ row_count }}</strong> rows remaining · {{ field_count }} flagged fields</p>
+  </div>
+  <a class="secondary button" href="/review/rows/next?batch_id={{ batch.id }}&skip_page_id={{ page.id }}&skip_line={{ line_number }}">Skip this row</a>
+</div>
+
+<form class="row-review-form" method="post" action="/review/rows/{{ candidates[0].run_id }}/{{ page.id }}/{{ line_number }}" data-review-form data-row-review>
+  <div class="row-review-sticky">
+    <section class="row-review-evidence">
+      <div class="evidence-heading"><div><span class="eyebrow">Handwriting evidence</span><h2>Complete census row</h2></div><span>Line {{ line_number }}</span></div>
+      <div class="row-frame"><img class="row-crop row-crop-large" src="/pages/{{ page.id }}/crop?line={{ line_number }}" alt="Complete census row {{ line_number }}"></div>
+      <details><summary>Open full page for more context</summary><img class="full-page" src="/pages/{{ page.id }}/image" alt="Full census page"></details>
+    </section>
+    <div class="row-review-toolbar card">
+      <label>Reviewer name / initials<input name="reviewer" required autocomplete="name" data-reviewer></label>
+      <label class="row-rationale">Decision note (optional)<input name="rationale" placeholder="One note applies to this row"></label>
+      <button type="submit" data-save-row title="Keyboard shortcut: Command/Control + Enter">Save row &amp; next</button>
+    </div>
+  </div>
+  <div class="review-field-grid">
+    {% for candidate in candidates %}
+    {% set display_confidence = 'low' if candidate.normalized_value is none or candidate.normalized_value == '' else candidate.model_confidence %}
+    <article class="review-field-card priority-{{ candidate.priority }}">
+      <input type="hidden" name="candidate_id" value="{{ candidate.id }}">
+      <div class="review-field-heading">
+        <label for="value-{{ candidate.id }}">{{ candidate.field_name }}</label>
+        <span class="confidence confidence-{{ display_confidence }}">{{ display_confidence }}</span>
+      </div>
+      <input id="value-{{ candidate.id }}" name="value_{{ candidate.id }}" value="{{ candidate.normalized_value or '' }}" data-review-value autocomplete="off">
+      <select name="resolution_{{ candidate.id }}" aria-label="Resolution for {{ candidate.field_name }}">
+        <option value="value">Use this reading</option>
+        <option value="unreadable">Mark unreadable</option>
+        <option value="deferred">Defer this field</option>
+      </select>
+      <p>{{ reasons[candidate.id]|join('; ') or ('Quality-control sample' if candidate.qc_sampled else 'Awaiting model calibration') }}</p>
+      {% if candidate.raw_value != candidate.normalized_value %}<small>Raw: {{ candidate.raw_value if candidate.raw_value is not none else '—' }}</small>{% endif %}
+    </article>
+    {% endfor %}
+  </div>
+</form>
+
+<details class="card line-context"><summary>All AI readings for this row</summary><div class="context-grid">{% for field in all_fields %}<div class="context-field"><span>{{ field.field_name }}</span><strong>{{ field.normalized_value if field.normalized_value is not none else '—' }}</strong></div>{% endfor %}</div></details>
+<script src="/static/review.js" defer></script>
+{% endblock %}

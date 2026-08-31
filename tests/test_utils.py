@@ -4,6 +4,7 @@ import utils
 def test_normalize_race_per_decade():
     assert utils.normalize_race("W", 1950) == "White"
     assert utils.normalize_race("Neg", 1950) == "Negro (Black)"
+    assert utils.normalize_race("neg", 1950) == "Negro (Black)"
     assert utils.normalize_race("Mul", 1900) == "Mulatto"
     # Unknown mark passes through unchanged (flag, don't invent).
     assert utils.normalize_race("Zz", 1950) == "Zz"

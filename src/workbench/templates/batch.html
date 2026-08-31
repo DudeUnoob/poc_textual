@@ -9,7 +9,7 @@
     <p>{{ batch.county }}, {{ batch.state }}{% if batch.source_reference %} · {{ batch.source_reference }}{% endif %}</p>
   </div>
   <div class="actions">
-    {% if queue_count %}<a class="button" href="/review/next?batch_id={{ batch.id }}">Review {{ queue_count }} fields</a>{% endif %}
+    {% if row_count %}<a class="button" href="/review/rows/next?batch_id={{ batch.id }}">Review {{ row_count }} rows</a>{% endif %}
     <form method="post" action="/batches/{{ batch.id }}/exports"><button class="secondary">Export reviewed data</button></form>
   </div>
 </div>
@@ -17,7 +17,7 @@
 <nav class="workflow-strip" aria-label="Batch workflow">
   <div class="workflow-step {% if ready %}is-complete{% endif %}"><span>1</span><div><strong>Page manifest</strong><small>{{ 'Confirmed' if ready else 'Needs attention' }}</small></div></div>
   <div class="workflow-step {% if runs and runs[0].status == 'completed' %}is-complete{% elif runs and runs[0].status in ['queued', 'running'] %}is-active{% elif runs and runs[0].status == 'failed' %}is-blocked{% endif %}"><span>2</span><div><strong>AI extraction</strong><small>{% if not runs %}Not started{% else %}{{ runs[0].status|replace('_', ' ') }}{% endif %}</small></div></div>
-  <div class="workflow-step {% if queue_count %}is-active{% endif %}"><span>3</span><div><strong>Human review</strong><small>{{ queue_count }} fields waiting</small></div></div>
+  <div class="workflow-step {% if row_count %}is-active{% endif %}"><span>3</span><div><strong>Human review</strong><small>{{ row_count }} rows · {{ queue_count }} fields waiting</small></div></div>
 </nav>
 
 <details class="card manifest-panel" {% if not ready %}open{% endif %}>
@@ -42,10 +42,12 @@
     <p class="run-message" data-message>{{ state.message }}</p>
     <div class="progress-track" role="progressbar" aria-label="Extraction progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ state.percent }}"><span data-progress-bar style="width:{{ state.percent }}%"></span></div>
     <div class="progress-caption"><span><strong data-completed>{{ state.completed_pages }}</strong>/<span data-total>{{ state.total_pages }}</span> pages safely saved</span><strong data-percent>{{ state.percent }}%</strong></div>
-    <div class="run-metrics"><div><span>Current page</span><strong data-current-page>{{ state.current_page or '—' }}</strong></div><div><span>Current pass</span><strong data-current-pass>{{ state.current_pass or '—' }}</strong></div><div><span>API attempt</span><strong data-api-attempt>{{ state.api_attempt or '—' }}</strong></div><div><span data-time-label>{{ 'Run duration' if state.terminal else 'Time in current step' }}</span><strong data-step-elapsed>{{ state.elapsed_seconds or state.step_elapsed_seconds or 0 }}s</strong></div><div><span>Automatic retries</span><strong data-retries>{{ state.retry_count }}</strong></div><div><span>Review fields ready</span><strong data-review-items>{{ state.review_items }}</strong></div></div>
+    <div class="run-metrics"><div><span>Current page</span><strong data-current-page>{{ state.current_page or '—' }}</strong></div><div><span>Current pass</span><strong data-current-pass>{{ state.current_pass or '—' }}</strong></div><div><span>API attempt</span><strong data-api-attempt>{{ state.api_attempt or '—' }}</strong></div><div><span data-time-label>{{ 'Run duration' if state.terminal else 'Time in current step' }}</span><strong data-step-elapsed>{{ state.elapsed_seconds or state.step_elapsed_seconds or 0 }}s</strong></div><div><span>Automatic retries</span><strong data-retries>{{ state.retry_count }}</strong></div><div><span>Review rows ready</span><strong data-review-items>{{ state.review_rows }}</strong></div></div>
     <p class="run-meta">Run attempt <span data-attempt>{{ state.job_attempt or 1 }}</span> · Last update <span data-last-update>{{ state.last_update or '—' }}</span></p>
     <p class="action-required" data-action-required {% if not state.action_required %}hidden{% endif %}>{{ state.action_required or '' }}</p>
     <form method="post" action="/runs/{{ run.id }}/resume" data-resume {% if not state.can_resume %}hidden{% endif %}><button>Resume after resolving the issue</button><small>Already completed pages will be skipped.</small></form>
+    {% if run.status in ['queued', 'running', 'failed'] and (run.model != 'gemini-3.5-flash' or run.config.get('strategy') != 'row_blocks') %}<form method="post" action="/runs/{{ run.id }}/switch-to-fast" class="switch-fast"><button>Switch to fast extraction</button><small>Preserves this run for audit and starts a benchmarked Flash row-band run.</small></form>{% endif %}
+    {% if run.status in ['queued', 'running'] %}<form method="post" action="/runs/{{ run.id }}/cancel" class="stop-run"><button class="ghost">Stop safely</button><small>Completed pages remain available in this run.</small></form>{% endif %}
     <details class="event-log"><summary>Recent activity and technical details</summary><ol data-events>{% for event in state.events[-6:]|reverse %}<li>{{ event.at }} · {{ event.message or event.type }}</li>{% endfor %}</ol><div class="run-error" data-error {% if not state.error %}hidden{% endif %}><strong>Provider error</strong><pre>{{ state.error or '' }}</pre></div></details>
   </article>
   {% endif %}

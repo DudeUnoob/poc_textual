@@ -1,9 +1,10 @@
 """
 Census image -> structured JSON records via the Gemini vision API.
 
-Primary model: gemini-3.1-pro-preview. No GPU required; a stateless API call.
-Pipeline: full-page pass + overlapping row-block crops, reconcile by line
-number, one targeted retry for gaps, then per-decade normalization. Emits the
+Primary model: gemini-3.5-flash. No GPU required; stateless API calls.
+Pipeline: concurrent row-block crops, reconcile by line number, one targeted
+retry for gaps, then per-decade normalization. The legacy adaptive full-page
+strategy remains available for benchmark comparisons. Emits the
 canonical JSON envelope (source_image / census_year / record_count / records)
 that compare.py already understands, plus a diagnostics block.
 """
@@ -14,7 +15,9 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Callable
 
 from dotenv import load_dotenv
@@ -23,7 +26,7 @@ from google.genai import types
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from paths import OUTPUTS_DIR, PROMPTS_DIR
-from preprocess import Crop, make_targeted_crop, prepare_full_page
+from preprocess import Crop, make_row_block_crops, make_targeted_crop, prepare_full_page
 from models import (FIELD_TO_GT_COLUMN_1950, ExtractionBatch, FieldConfidence,
                     Legibility, PersonRecord1950, to_gt_record)
 from reconcile import reconcile_page
@@ -32,14 +35,19 @@ from utils import (BIRTHPLACE_COLUMN, GENDER_COLUMN, normalize_gender,
 
 load_dotenv()
 
-DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
+DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 DEFAULT_TEMPERATURE = float(os.environ.get("GEMINI_TEMPERATURE", "0.0"))
 MAX_RETRIES_API = 3
 # Thinking-tier models spend output-token budget on internal reasoning before
 # emitting the actual JSON; bounding thinking_budget and giving max_output_tokens
 # plenty of headroom keeps a full ~30-record page from being truncated mid-string.
-DEFAULT_THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "1024"))
+DEFAULT_THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "0"))
 DEFAULT_MAX_OUTPUT_TOKENS = int(os.environ.get("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
+
+# The dense 1950 table occupies only this part of the physical scan. Cropping
+# to it gives the vision model substantially larger handwriting without
+# spending image tokens on the form header and footer.
+DATA_AREA_BY_YEAR = {1950: (0.32, 0.645)}
 
 
 def get_client() -> genai.Client:
@@ -60,14 +68,18 @@ def load_prompt(year: int) -> tuple[str, str]:
     return system, user
 
 
-def _config(system_prompt: str, max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS) -> types.GenerateContentConfig:
+def _config(system_prompt: str, model: str,
+            max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS) -> types.GenerateContentConfig:
+    thinking_budget = DEFAULT_THINKING_BUDGET
+    if "pro" in model.casefold() and thinking_budget == 0:
+        thinking_budget = 1024
     return types.GenerateContentConfig(
         system_instruction=system_prompt,
         temperature=DEFAULT_TEMPERATURE,
         response_mime_type="application/json",
         response_schema=ExtractionBatch,
         media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
-        thinking_config=types.ThinkingConfig(thinking_budget=DEFAULT_THINKING_BUDGET),
+        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
         max_output_tokens=max_output_tokens,
     )
 
@@ -96,7 +108,7 @@ def call_gemini(client: genai.Client, model: str, system_prompt: str,
         try:
             response = client.models.generate_content(
                 model=model, contents=contents,
-                config=_config(system_prompt, max_output_tokens=output_token_budget),
+                config=_config(system_prompt, model, max_output_tokens=output_token_budget),
             )
             parsed = response.parsed
             if isinstance(parsed, ExtractionBatch):
@@ -208,6 +220,99 @@ def _cluster_flagged_lines(
     return [(lo, hi) for lo, hi in clusters]
 
 
+def _line_crop(image_path: str, year: int, lo_line: int, hi_line: int,
+               expected_lines: int, label: str) -> Crop:
+    """Crop census lines using the decade's actual table bounds."""
+    data_top, data_bottom = DATA_AREA_BY_YEAR.get(year, (0.0, 1.0))
+    span = data_bottom - data_top
+    lo = data_top + span * (lo_line - 1) / expected_lines
+    hi = data_top + span * hi_line / expected_lines
+    return make_targeted_crop(image_path, lo, hi, label=label)
+
+
+def _row_block_prompt(base_prompt: str, lo_line: int, hi_line: int) -> str:
+    return (
+        f"{base_prompt}\n\nFOCUSED CROP: Read only printed census line numbers "
+        f"{lo_line} through {hi_line}. The crop overlaps adjacent rows for visual "
+        "context; do not return records outside that numbered range."
+    )
+
+
+def _extract_row_blocks(
+    image_path: str,
+    year: int,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    expected_lines: int,
+    n_blocks: int,
+    client: genai.Client | None,
+    event_callback: Callable[[dict], None] | None,
+    parallelism: int,
+) -> dict[str, list[PersonRecord1950]]:
+    """Read small row bands concurrently to avoid one huge, slow JSON response."""
+    data_top, data_bottom = DATA_AREA_BY_YEAR.get(year, (0.0, 1.0))
+    crops = make_row_block_crops(
+        image_path, n_blocks=n_blocks, overlap_frac=0.10,
+        top_frac=data_top, bottom_frac=data_bottom,
+    )
+    tasks: list[tuple[Crop, int, int]] = []
+    for index, crop in enumerate(crops):
+        lo_line = (index * expected_lines) // n_blocks + 1
+        hi_line = ((index + 1) * expected_lines) // n_blocks
+        tasks.append((crop, lo_line, hi_line))
+
+    def read(task: tuple[Crop, int, int], callback) -> tuple[str, list[PersonRecord1950]]:
+        crop, lo_line, hi_line = task
+        task_client = client or get_client()
+        records = call_gemini(
+            task_client, model, system_prompt,
+            _row_block_prompt(user_prompt, lo_line, hi_line),
+            crop.image_bytes, crop.mime_type,
+            event_callback=callback, source_label=crop.label,
+        )
+        return crop.label, records
+
+    # Explicitly supplied clients are commonly test doubles and are not
+    # assumed thread-safe. Production calls create one lightweight client per
+    # block and run concurrently.
+    if client is not None or parallelism <= 1 or len(tasks) == 1:
+        return dict(read(task, event_callback) for task in tasks)
+
+    event_queue: Queue[dict] = Queue()
+    results: dict[str, list[PersonRecord1950]] = {}
+    with ThreadPoolExecutor(max_workers=min(parallelism, len(tasks))) as pool:
+        pending = {pool.submit(read, task, event_queue.put) for task in tasks}
+        completed = 0
+        while pending:
+            done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+            while True:
+                try:
+                    event = event_queue.get_nowait()
+                except Empty:
+                    break
+                if event_callback:
+                    event_callback(event)
+            for future in done:
+                label, records = future.result()
+                results[label] = records
+                completed += 1
+                if event_callback:
+                    event_callback({
+                        "type": "block_completed", "source": label,
+                        "message": f"Finished row block {completed}/{len(tasks)}",
+                        "completed_blocks": completed, "total_blocks": len(tasks),
+                    })
+        while True:
+            try:
+                event = event_queue.get_nowait()
+            except Empty:
+                break
+            if event_callback:
+                event_callback(event)
+    return results
+
+
 def _review_candidates(
     merged: list[PersonRecord1950], raw_records: list[dict], normalized_records: list[dict],
     diagnostics: dict, expected_lines: int,
@@ -227,11 +332,13 @@ def _review_candidates(
             value = normalized.get(gt_column)
             raw_value = raw.get(gt_column)
             declared = getattr(person.field_confidence, field_name, None)
-            if declared is not None:
+            if value in (None, ""):
+                confidence = "low"
+            elif declared is not None:
                 confidence = declared.value if isinstance(declared, FieldConfidence) else str(declared)
             elif person.legibility == Legibility.clear and value not in (None, ""):
                 confidence = "high"
-            elif person.legibility == Legibility.illegible or value in (None, ""):
+            elif person.legibility == Legibility.illegible:
                 confidence = "low"
             else:
                 confidence = "medium"
@@ -268,28 +375,38 @@ def extract_with_review_data(
     n_blocks: int = 3,
     expected_lines: int = 30,
     event_callback: Callable[[dict], None] | None = None,
+    strategy: str = "adaptive_full_page",
+    parallelism: int = 3,
 ) -> tuple[list[dict], dict, list[dict]]:
     """Extract one page and return canonical records plus review provenance."""
-    if client is None:
+    if client is None and strategy != "row_blocks":
         client = get_client()
     system_prompt, user_prompt = load_prompt(year)
 
-    page_bytes, page_mime = prepare_full_page(image_path)
-    full_records = call_gemini(
-        client, model, system_prompt, user_prompt, page_bytes, page_mime,
-        event_callback=event_callback, source_label="full_page",
-    )
-    per_source: dict[str, list[PersonRecord1950]] = {"full_page": full_records}
+    if strategy == "row_blocks":
+        per_source = _extract_row_blocks(
+            image_path, year, model, system_prompt, user_prompt,
+            expected_lines, n_blocks, client, event_callback, parallelism,
+        )
+        full_records: list[PersonRecord1950] = []
+    else:
+        page_bytes, page_mime = prepare_full_page(image_path)
+        full_records = call_gemini(
+            client, model, system_prompt, user_prompt, page_bytes, page_mime,
+            event_callback=event_callback, source_label="full_page",
+        )
+        per_source = {"full_page": full_records}
 
-    if use_crops:
+    if use_crops and strategy != "row_blocks":
         flagged = _flagged_lines(full_records, expected_lines)
         if flagged:
             for i, (lo_line, hi_line) in enumerate(
                 _cluster_flagged_lines(flagged, max_clusters=n_blocks)
             ):
-                lo = (lo_line - 1) / expected_lines
-                hi = hi_line / expected_lines
-                crop: Crop = make_targeted_crop(image_path, lo, hi, label=f"crop_{i + 1}")
+                crop = _line_crop(
+                    image_path, year, lo_line, hi_line, expected_lines,
+                    label=f"crop_{i + 1}",
+                )
                 crop_records = call_gemini(
                     client, model, system_prompt, user_prompt, crop.image_bytes, crop.mime_type,
                     event_callback=event_callback, source_label=crop.label,
@@ -298,11 +415,14 @@ def extract_with_review_data(
 
     def retry_fn(missing_lines: list[int]) -> list[PersonRecord1950]:
         """Targeted retry: crop the page region covering the missing lines."""
-        lo = (min(missing_lines) - 1) / expected_lines
-        hi = max(missing_lines) / expected_lines
-        crop = make_targeted_crop(image_path, lo, hi, label="retry")
+        crop = _line_crop(
+            image_path, year, min(missing_lines), max(missing_lines),
+            expected_lines, label="retry",
+        )
         return call_gemini(
-            client, model, system_prompt, user_prompt, crop.image_bytes, crop.mime_type,
+            client or get_client(), model, system_prompt,
+            _row_block_prompt(user_prompt, min(missing_lines), max(missing_lines)),
+            crop.image_bytes, crop.mime_type,
             event_callback=event_callback, source_label="targeted_retry",
         )
 
@@ -327,12 +447,15 @@ def extract_from_image(
     n_blocks: int = 3,
     expected_lines: int = 30,
     event_callback: Callable[[dict], None] | None = None,
+    strategy: str = "adaptive_full_page",
+    parallelism: int = 3,
 ) -> tuple[list[dict], dict]:
     """Backward-compatible extraction interface used by CLI and tests."""
     records, diagnostics, _ = extract_with_review_data(
         image_path, year, client=client, model=model, use_crops=use_crops,
         n_blocks=n_blocks, expected_lines=expected_lines,
         event_callback=event_callback,
+        strategy=strategy, parallelism=parallelism,
     )
     return records, diagnostics
 

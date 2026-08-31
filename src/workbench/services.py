@@ -180,7 +180,8 @@ def latest_candidate_run_id_query(batch_id: int):
         .scalar_subquery())
 
 
-def queue_query(batch_id: int, exclude_candidate_id: int | None = None):
+def queue_query(batch_id: int, exclude_candidate_id: int | None = None,
+                exclude_row: tuple[int, int] | None = None):
     latest_run_id = latest_candidate_run_id_query(batch_id)
     query = (select(FieldCandidate)
         .join(Page)
@@ -198,11 +199,76 @@ def queue_query(batch_id: int, exclude_candidate_id: int | None = None):
         ))
     if exclude_candidate_id is not None:
         query = query.where(FieldCandidate.id != exclude_candidate_id)
+    if exclude_row is not None:
+        page_id, line_number = exclude_row
+        query = query.where(
+            (FieldCandidate.page_id != page_id)
+            | (FieldCandidate.line_number != line_number)
+        )
     return query
 
 
 def review_queue_count(session: Session, batch_id: int) -> int:
     return session.scalar(select(func.count()).select_from(queue_query(batch_id).subquery())) or 0
+
+
+def review_row_count(session: Session, batch_id: int) -> int:
+    """Count human review units, grouping all risky fields on one census row."""
+    rows = (queue_query(batch_id)
+        .with_only_columns(
+            FieldCandidate.run_id, FieldCandidate.page_id,
+            FieldCandidate.line_number,
+        )
+        .order_by(None)
+        .distinct()
+        .subquery())
+    return session.scalar(select(func.count()).select_from(rows)) or 0
+
+
+def reclassify_run_candidates(session: Session, run_id: int,
+                              exclude_page_ids: set[int] | None = None) -> dict[str, int]:
+    """Apply the measured auto-accept policy to an already completed run.
+
+    Calibration pages can be excluded so the observations used to establish a
+    precision band are never auto-accepted by that same band.
+    """
+    excluded = exclude_page_ids or set()
+    candidates = session.scalars(
+        select(FieldCandidate)
+        .where(
+            FieldCandidate.run_id == run_id,
+            FieldCandidate.status.in_({"review_required", "sample_review", "auto_accepted"}),
+        )
+        .options(joinedload(FieldCandidate.page).joinedload(Page.batch))
+    ).unique().all()
+    counts: dict[str, int] = defaultdict(int)
+    for candidate in candidates:
+        warnings = [*candidate.reasons, *candidate.validation_warnings]
+        can_auto_accept = (
+            candidate.page_id not in excluded
+            and candidate.model_confidence == "high"
+            and candidate.row_legibility == "clear"
+            and not candidate.has_conflict
+            and not warnings
+            and candidate.normalized_value not in (None, "")
+            and calibration_allows(
+                session, candidate.page.batch.census_year,
+                candidate.field_name, "high",
+            )
+        )
+        sampled = can_auto_accept and deterministic_sample(
+            candidate.page_id, candidate.line_number, candidate.field_name
+        )
+        candidate.auto_accepted = can_auto_accept
+        candidate.qc_sampled = sampled
+        candidate.status = (
+            "sample_review" if sampled else
+            "auto_accepted" if can_auto_accept else
+            "review_required"
+        )
+        counts[candidate.status] += 1
+    session.flush()
+    return dict(counts)
 
 
 def apply_decision(session: Session, candidate: FieldCandidate, reviewer: str, action: str,
@@ -211,7 +277,7 @@ def apply_decision(session: Session, candidate: FieldCandidate, reviewer: str, a
         raise ValueError("Reviewer name or initials are required.")
     if action not in {"confirmed", "corrected", "unreadable", "deferred"}:
         raise ValueError("Invalid review action.")
-    if action == "corrected" and not (value or "").strip():
+    if action == "corrected" and value is None:
         raise ValueError("A corrected value is required.")
     final_value = None if action == "unreadable" else (value.strip() if action == "corrected" else candidate.normalized_value)
     decision = ReviewDecision(

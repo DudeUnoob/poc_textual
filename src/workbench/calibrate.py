@@ -45,8 +45,8 @@ def record_calibration(extracted: str, ground_truth: str, sheet: str, page: int,
             if band is None:
                 band = CalibrationBand(census_year=year, field_name=field, confidence=confidence)
                 session.add(band)
-            band.total += len(matches)
-            band.correct += sum(matches)
+            band.total = (band.total or 0) + len(matches)
+            band.correct = (band.correct or 0) + sum(matches)
             band.updated_at = datetime.utcnow()
         session.commit()
     return {"metrics": metrics, "bands": {f"{field}:{confidence}": {"total": len(values), "correct": sum(values)} for (field, confidence), values in observed.items()}}

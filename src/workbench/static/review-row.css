@@ -1,0 +1,74 @@
+.row-review-evidence {
+  background: #17222b;
+  border-radius: 12px;
+  padding: 16px;
+  color: white;
+  margin: 20px 0;
+}
+.row-review-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--paper);
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.row-frame { overflow-x: auto; }
+.row-crop-large { min-height: 120px; min-width: 1000px; object-fit: contain; }
+.row-review-toolbar {
+  display: grid;
+  grid-template-columns: 220px 1fr auto;
+  gap: 12px;
+  align-items: end;
+  box-shadow: 0 8px 25px #0f172a18;
+}
+.row-review-toolbar button { gap: 8px; white-space: nowrap; }
+.row-review-toolbar kbd { font-size: 10px; opacity: .85; }
+.row-review-toolbar label { margin: 0; }
+.review-field-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.review-field-card {
+  background: white;
+  border: 1px solid var(--line);
+  border-left: 4px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+}
+.review-field-card.priority-0,
+.review-field-card.priority-1 { border-left-color: #dc2626; }
+.review-field-card.priority-2,
+.review-field-card.priority-3 { border-left-color: #d97706; }
+.review-field-heading { display: flex; justify-content: space-between; align-items: center; }
+.review-field-heading label { font-size: 14px; }
+.review-field-card p { font-size: 12px; color: var(--muted); margin: 0; min-height: 34px; }
+.review-field-card small { color: var(--muted); }
+.confidence {
+  font-size: 10px;
+  text-transform: uppercase;
+  font-weight: 800;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+.confidence-low { background: #fee2e2; color: #991b1b; }
+.confidence-medium { background: #fef3c7; color: #92400e; }
+.confidence-high { background: #d1fae5; color: #065f46; }
+.context-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.context-field { display: flex; flex-direction: column; padding: 9px; background: #f8fafc; border-radius: 6px; }
+.context-field span { font-size: 11px; color: var(--muted); }
+.context-field strong { font-size: 13px; }
+@media (max-width: 900px) {
+  .review-field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .row-review-toolbar { grid-template-columns: 1fr 1fr; }
+  .row-review-toolbar button { grid-column: 1 / -1; }
+}
+@media (max-width: 600px) {
+  .review-field-grid, .row-review-toolbar, .context-grid { grid-template-columns: 1fr; }
+  .row-rationale { display: none; }
+  .row-review-sticky { position: static; }
+}

@@ -15,7 +15,9 @@ then measures how accurately it does so compared to human-cleaned records.
 error-prone on 19th–20th century handwriting. This project tests whether a
 frontier vision model can do better.
 
-**Model:** Google **Gemini 3.1 Pro** (`gemini-3.1-pro-preview`) via the API.
+**Model:** Google **Gemini 3.5 Flash** (`gemini-3.5-flash`) via the API. The local
+workbench reads three row bands concurrently and retains Gemini 3.1 Pro as an
+accuracy-escalation option.
 No GPU and no model download required — extraction is a stateless API call.
 Gemini currently leads independent handwritten-form benchmarks (lowest free-text
 error rate), which is why it is the primary extractor here.

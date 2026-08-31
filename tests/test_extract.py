@@ -39,6 +39,14 @@ def test_call_gemini_parses_structured_batch():
     assert client.models.calls == 1
 
 
+def test_pro_model_keeps_required_thinking_when_fast_mode_disables_it(monkeypatch):
+    monkeypatch.setattr(extract, "DEFAULT_THINKING_BUDGET", 0)
+    config = extract._config("sys", "gemini-3.1-pro-preview")
+    assert config.thinking_config.thinking_budget == 1024
+    fast = extract._config("sys", "gemini-3.1-flash-lite")
+    assert fast.thinking_config.thinking_budget == 0
+
+
 def test_call_gemini_falls_back_to_text_json():
     payload = json.dumps({"records": [{"line_number": 2, "surname": "Ng"}]})
     client = _Client([_Resp(parsed=None, text=payload)])
@@ -123,6 +131,18 @@ def test_post_process_normalizes_and_propagates_dittos():
     assert out[1]["Marital Status"] == "Widowed"
 
 
+def test_missing_candidate_is_low_confidence_even_if_model_claims_high():
+    person = PersonRecord1950(line_number=1, surname=None)
+    person.field_confidence.surname = "high"
+    candidates = extract._review_candidates(
+        [person], [{"Line Number": 1, "Surname": None}],
+        [{"Line Number": 1, "Surname": None}],
+        {"conflict_fields_by_line": {}, "line_sources": {"1": "crop_1"}}, 30,
+    )
+    surname = next(item for item in candidates if item["field"] == "Surname")
+    assert surname["model_confidence"] == "low"
+
+
 def test_get_client_requires_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
@@ -153,6 +173,31 @@ def test_extract_from_image_skips_crops_when_full_page_complete(monkeypatch):
     )
     assert client.models.calls == 1
     assert diagnostics["crops_used"] == 1
+    assert diagnostics["missing_lines"] == []
+
+
+def test_row_block_strategy_skips_slow_full_page_response(monkeypatch):
+    monkeypatch.setattr(extract, "load_prompt", lambda year: ("sys", "usr"))
+    monkeypatch.setattr(
+        extract, "prepare_full_page",
+        lambda path: (_ for _ in ()).throw(AssertionError("full page should not run")),
+    )
+    crops = [
+        extract.Crop(index=i, image_bytes=f"crop{i}".encode(), mime_type="image/jpeg", y_start=i, y_end=i + 1, label=f"crop_{i + 1}")
+        for i in range(3)
+    ]
+    monkeypatch.setattr(extract, "make_row_block_crops", lambda *args, **kwargs: crops)
+    client = _Client([
+        _full_batch([PersonRecord1950(line_number=1, surname="A")]),
+        _full_batch([PersonRecord1950(line_number=2, surname="B")]),
+        _full_batch([PersonRecord1950(line_number=3, surname="C")]),
+    ])
+    records, diagnostics = extract.extract_from_image(
+        "sheet.jpg", 1950, client=client, expected_lines=3,
+        n_blocks=3, strategy="row_blocks", use_crops=False,
+    )
+    assert client.models.calls == 3
+    assert [record["Line Number"] for record in records] == [1, 2, 3]
     assert diagnostics["missing_lines"] == []
 
 

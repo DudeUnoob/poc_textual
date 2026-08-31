@@ -16,6 +16,10 @@ from .progress import classify_failure, progress_data, update_progress
 from .services import persist_extraction
 
 
+class RunCancelled(Exception):
+    pass
+
+
 def recover_interrupted_runs() -> int:
     """Re-queue work left in ``running`` state by a worker restart/crash."""
     with SessionLocal() as session:
@@ -89,6 +93,9 @@ def process_next_run() -> bool:
                 session.commit()
 
                 def on_extraction_event(event: dict) -> None:
+                    session.refresh(run, attribute_names=["status"])
+                    if run.status == "cancel_requested":
+                        raise RunCancelled("Fast extraction requested")
                     current = progress_data(run)
                     retry_count = int(current.get("retry_count") or 0)
                     if event.get("type") == "api_error" and event.get("retry_in_seconds") is not None:
@@ -108,6 +115,11 @@ def process_next_run() -> bool:
                 records, diagnostics, candidates = extract_with_review_data(
                     page.stored_path, page.batch.census_year, model=model,
                     event_callback=on_extraction_event,
+                    use_crops=bool((run.config or {}).get("use_crops", True)),
+                    expected_lines=int((run.config or {}).get("expected_lines", 30)),
+                    strategy=(run.config or {}).get("strategy", "adaptive_full_page"),
+                    n_blocks=int((run.config or {}).get("n_blocks", 3)),
+                    parallelism=int((run.config or {}).get("parallelism", 3)),
                 )
                 payload = {"source_image": page.stored_path, "census_year": page.batch.census_year,
                            "model": model, "records": records, "diagnostics": diagnostics,
@@ -143,6 +155,17 @@ def process_next_run() -> bool:
                 event={"type": "run_completed", "message": "Extraction run completed"},
             )
             session.commit()
+    except RunCancelled:
+        with SessionLocal() as session:
+            run = session.get(ExtractionRun, run_id)
+            run.status, run.error, run.finished_at = "cancelled", None, datetime.utcnow()
+            update_progress(
+                run, phase="cancelled",
+                message="Stopped safely; the fast replacement run is next",
+                event={"type": "run_cancelled", "message": "Old extraction stopped safely"},
+            )
+            session.commit()
+        return True
     except Exception as exc:
         with SessionLocal() as session:
             run = session.get(ExtractionRun, run_id)

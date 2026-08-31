@@ -4,6 +4,7 @@ import mimetypes
 import os
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -19,12 +20,27 @@ from sqlalchemy.orm import Session, joinedload
 from .db import Batch, Export, ExtractionRun, FieldCandidate, Page, SessionLocal, init_db
 from .progress import now_iso, run_snapshot, update_progress
 from .schema import get_schema
-from .services import (apply_decision, batch_ready, create_export, import_files,
-                       queue_query, review_queue_count, update_page_manifest)
+from .services import (QUEUE_STATUSES, apply_decision, batch_ready, create_export,
+                       import_files, queue_query, review_queue_count,
+                       review_row_count, update_page_manifest)
 
 TEMPLATES = Jinja2Templates(directory=str(__file__.replace("web.py", "templates")))
 STATIC_DIR = __file__.replace("web.py", "static")
-DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
+DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+
+
+def extraction_config(total_pages: int) -> dict:
+    timestamp = now_iso()
+    return {
+        "use_crops": True, "expected_lines": 30,
+        "strategy": "row_blocks", "n_blocks": 3, "parallelism": 3,
+        "progress": {
+            "phase": "queued", "message": "Waiting for the local extraction worker",
+            "total_pages": total_pages, "completed_pages": 0,
+            "retry_count": 0, "job_attempt": 0, "last_update": timestamp,
+            "events": [{"type": "run_queued", "message": "Fast row-band run added to the worker queue", "at": timestamp}],
+        },
+    }
 
 
 @asynccontextmanager
@@ -82,7 +98,7 @@ def render_row_crop(image_path: str, line: int, schema, field: str | None = None
 def dashboard(request: Request):
     with SessionLocal() as session:
         batches = session.scalars(select(Batch).options(joinedload(Batch.pages)).order_by(Batch.created_at.desc())).unique().all()
-        counts = {batch.id: review_queue_count(session, batch.id) for batch in batches}
+        counts = {batch.id: review_row_count(session, batch.id) for batch in batches}
         summaries = {}
         for batch in batches:
             latest_run = session.scalar(select(ExtractionRun).where(ExtractionRun.batch_id == batch.id).order_by(ExtractionRun.created_at.desc()))
@@ -93,7 +109,7 @@ def dashboard(request: Request):
                 "ready": ready,
                 "run_status": latest_run.status if latest_run else None,
                 "next_step": (
-                    f"Review {counts[batch.id]} flagged fields" if counts[batch.id]
+                    f"Review {counts[batch.id]} flagged rows" if counts[batch.id]
                     else "Resume the paused extraction" if latest_run and latest_run.status == "failed"
                     else "Extraction is in progress" if latest_run and latest_run.status in {"queued", "running"}
                     else "Ready to start extraction" if ready and not latest_run
@@ -143,7 +159,8 @@ def batch_detail(request: Request, batch_id: int):
         runs = session.scalars(select(ExtractionRun).where(ExtractionRun.batch_id == batch_id).order_by(ExtractionRun.created_at.desc())).all()
         run_snapshots = {run.id: run_snapshot(session, run) for run in runs}
         queue_count = review_queue_count(session, batch_id)
-        return TEMPLATES.TemplateResponse(request, "batch.html", {"batch": batch, "ready": ready, "reason": reason, "runs": runs, "run_snapshots": run_snapshots, "queue_count": queue_count})
+        row_count = review_row_count(session, batch_id)
+        return TEMPLATES.TemplateResponse(request, "batch.html", {"batch": batch, "ready": ready, "reason": reason, "runs": runs, "run_snapshots": run_snapshots, "queue_count": queue_count, "row_count": row_count})
 
 
 @app.post("/pages/{page_id}/manifest")
@@ -189,17 +206,10 @@ def queue_run(batch_id: int):
         if not ready:
             raise HTTPException(status_code=400, detail=reason)
         total_pages = sum(1 for page in batch.pages if page.kind == "census")
-        timestamp = now_iso()
-        run = ExtractionRun(batch_id=batch.id, model=DEFAULT_MODEL, config={
-            "use_crops": True,
-            "expected_lines": 30,
-            "progress": {
-                "phase": "queued", "message": "Waiting for the local extraction worker",
-                "total_pages": total_pages, "completed_pages": 0,
-                "retry_count": 0, "job_attempt": 0, "last_update": timestamp,
-                "events": [{"type": "run_queued", "message": "Run added to the worker queue", "at": timestamp}],
-            },
-        })
+        run = ExtractionRun(
+            batch_id=batch.id, model=DEFAULT_MODEL,
+            config=extraction_config(total_pages),
+        )
         session.add(run)
         session.commit()
         return RedirectResponse(f"/batches/{batch.id}", status_code=303)
@@ -222,6 +232,67 @@ def resume_run(run_id: int):
         )
         session.commit()
         return RedirectResponse(f"/batches/{run.batch_id}", status_code=303)
+
+
+@app.post("/runs/{run_id}/switch-to-fast")
+def switch_to_fast_run(run_id: int):
+    """Preserve the old audit run and queue a calibrated low-latency extraction."""
+    with SessionLocal() as session:
+        run = session.get(ExtractionRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Extraction run not found")
+        if run.status not in {"queued", "running", "failed"}:
+            raise HTTPException(status_code=400, detail="This run can no longer be switched.")
+        duplicate = session.scalar(select(ExtractionRun).where(
+            ExtractionRun.batch_id == run.batch_id,
+            ExtractionRun.status.in_({"queued", "running"}),
+            ExtractionRun.id != run.id,
+            ExtractionRun.model == DEFAULT_MODEL,
+        ))
+        if duplicate:
+            raise HTTPException(status_code=400, detail="A fast extraction run is already queued.")
+        if run.status == "running":
+            run.status = "cancel_requested"
+            update_progress(
+                run, phase="cancel_requested",
+                message="Finishing the current API call, then switching to fast extraction",
+                event={"type": "cancel_requested", "message": "Reviewer requested fast extraction"},
+            )
+        else:
+            run.status, run.finished_at = "cancelled", datetime.utcnow()
+        total_pages = session.scalar(select(func.count(Page.id)).where(
+            Page.batch_id == run.batch_id, Page.kind == "census"
+        )) or 0
+        replacement = ExtractionRun(
+            batch_id=run.batch_id, model=DEFAULT_MODEL,
+            config=extraction_config(total_pages),
+        )
+        session.add(replacement)
+        session.commit()
+        return RedirectResponse(f"/batches/{run.batch_id}", status_code=303)
+
+
+@app.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: int):
+    """Request a checkpoint-safe stop without deleting completed output."""
+    with SessionLocal() as session:
+        run = session.get(ExtractionRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Extraction run not found")
+        if run.status not in {"queued", "running"}:
+            raise HTTPException(status_code=400, detail="Only queued or running jobs can be stopped.")
+        if run.status == "running":
+            run.status = "cancel_requested"
+            update_progress(
+                run, phase="cancel_requested",
+                message="Stopping after the current API call; completed pages are preserved",
+                event={"type": "cancel_requested", "message": "Reviewer requested a safe stop"},
+            )
+        else:
+            run.status, run.finished_at = "cancelled", datetime.utcnow()
+        batch_id = run.batch_id
+        session.commit()
+        return RedirectResponse(f"/batches/{batch_id}", status_code=303)
 
 
 @app.get("/runs/{run_id}/status")
@@ -287,6 +358,94 @@ def review_next(request: Request, batch_id: int, skip: int | None = None):
         queue_count = review_queue_count(session, batch_id)
         review_reasons = list(dict.fromkeys([*candidate.reasons, *candidate.validation_warnings]))
         return TEMPLATES.TemplateResponse(request, "review.html", {"candidate": candidate, "page": candidate.page, "batch": candidate.page.batch, "line_fields": line_fields, "queue_count": queue_count, "review_reasons": review_reasons})
+
+
+@app.get("/review/rows/next")
+def review_row_next(request: Request, batch_id: int, skip_page_id: int | None = None,
+                    skip_line: int | None = None):
+    """Review all risky fields on one visible census row in one action."""
+    with SessionLocal() as session:
+        exclude_row = (
+            (skip_page_id, skip_line)
+            if skip_page_id is not None and skip_line is not None else None
+        )
+        candidate = session.scalar(
+            queue_query(batch_id, exclude_row=exclude_row)
+            .options(joinedload(FieldCandidate.page).joinedload(Page.batch))
+        )
+        if not candidate:
+            batch = session.get(Batch, batch_id)
+            if not batch:
+                raise HTTPException(status_code=404, detail="Batch not found")
+            return TEMPLATES.TemplateResponse(request, "queue_empty.html", {"batch": batch})
+        row_candidates = session.scalars(select(FieldCandidate).where(
+            FieldCandidate.run_id == candidate.run_id,
+            FieldCandidate.page_id == candidate.page_id,
+            FieldCandidate.line_number == candidate.line_number,
+            FieldCandidate.status.in_(QUEUE_STATUSES),
+        ).order_by(FieldCandidate.priority, FieldCandidate.field_name)).all()
+        all_fields = session.scalars(select(FieldCandidate).where(
+            FieldCandidate.run_id == candidate.run_id,
+            FieldCandidate.page_id == candidate.page_id,
+            FieldCandidate.line_number == candidate.line_number,
+        ).order_by(FieldCandidate.field_name)).all()
+        reasons = {
+            item.id: list(dict.fromkeys([*item.reasons, *item.validation_warnings]))
+            for item in row_candidates
+        }
+        return TEMPLATES.TemplateResponse(request, "review_row.html", {
+            "page": candidate.page, "batch": candidate.page.batch,
+            "line_number": candidate.line_number, "candidates": row_candidates,
+            "all_fields": all_fields, "reasons": reasons,
+            "row_count": review_row_count(session, batch_id),
+            "field_count": review_queue_count(session, batch_id),
+        })
+
+
+@app.post("/review/rows/{run_id}/{page_id}/{line_number}")
+async def decide_row(request: Request, run_id: int, page_id: int, line_number: int):
+    form = await request.form()
+    reviewer = str(form.get("reviewer") or "")
+    rationale = str(form.get("rationale") or "") or None
+    try:
+        candidate_ids = [int(value) for value in form.getlist("candidate_id")]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid row review items")
+    with SessionLocal() as session:
+        candidates = session.scalars(select(FieldCandidate).where(
+            FieldCandidate.id.in_(candidate_ids),
+            FieldCandidate.run_id == run_id,
+            FieldCandidate.page_id == page_id,
+            FieldCandidate.line_number == line_number,
+            FieldCandidate.status.in_(QUEUE_STATUSES),
+        )).all()
+        if len(candidates) != len(set(candidate_ids)):
+            raise HTTPException(status_code=400, detail="One or more row fields are no longer reviewable")
+        deferred = False
+        try:
+            for candidate in candidates:
+                resolution = str(form.get(f"resolution_{candidate.id}") or "value")
+                submitted = str(form.get(f"value_{candidate.id}") or "").strip()
+                if resolution == "unreadable":
+                    action, value = "unreadable", None
+                elif resolution == "deferred":
+                    action, value, deferred = "deferred", None, True
+                elif resolution == "value":
+                    current = (candidate.normalized_value or "").strip()
+                    action = "confirmed" if submitted == current else "corrected"
+                    value = submitted if action == "corrected" else None
+                else:
+                    raise ValueError("Invalid row resolution")
+                apply_decision(session, candidate, reviewer, action, value, rationale)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        page = session.get(Page, page_id)
+        if not page:
+            raise HTTPException(status_code=404, detail="Page not found")
+        batch_id = page.batch_id
+        session.commit()
+        skip = f"&skip_page_id={page_id}&skip_line={line_number}" if deferred else ""
+        return RedirectResponse(f"/review/rows/next?batch_id={batch_id}{skip}", status_code=303)
 
 
 @app.post("/candidates/{candidate_id}/decision")
