@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="hero"><div><h1>Human review, where AI is uncertain.</h1><p>Import an ordered census-scan batch, preserve the original images, and review only the evidence-backed exceptions.</p></div></section>
-<section class="card"><h2>Import a 1950 scan batch</h2><p class="muted">Select a folder of authorized images. Filename order is only a hint—you confirm every page before extraction.</p>
+<section class="hero"><span class="eyebrow">1950 census pilot</span><h1>Turn scan batches into review-ready records.</h1><p>Import pages, watch extraction progress, and resolve only the fields that need human judgment.</p></section>
+{% if batches %}<section class="workspace-section"><div class="section-heading"><div><h2>Your batches</h2><p class="muted">Open a batch to continue from its exact saved state.</p></div></div>
+<div class="cards batch-grid">{% for batch in batches %}{% set summary = summaries[batch.id] %}<a class="card batch-card" href="/batches/{{ batch.id }}"><div class="batch-card-head"><strong>{{ batch.name }}</strong>{% if summary.run_status %}<span class="status-dot status-{{ summary.run_status }}">{{ summary.run_status }}</span>{% endif %}</div><span>{{ batch.county }}, {{ batch.state }} · ED {{ batch.enumeration_district }}</span><div class="batch-stats"><span><strong>{{ summary.pages }}</strong> census pages</span><span><strong>{{ counts[batch.id] }}</strong> to review</span></div><span class="next-step">{{ summary.next_step }} <b aria-hidden="true">→</b></span></a>{% endfor %}</div></section>{% endif %}
+<details class="card import-panel" {% if not batches %}open{% endif %}><summary><span><strong>{% if batches %}Import another batch{% else %}Import your first scan batch{% endif %}</strong><small>Select a local folder of authorized census images.</small></span></summary><div class="import-body"><p class="muted">Filename order is only a hint. You will confirm page numbers and identify covers before extraction starts.</p>
   <form method="post" action="/batches" enctype="multipart/form-data" class="form-grid">
     <label>Batch name<input name="name" required placeholder="Bastrop ED 11-1"></label>
     <label>County<input name="county" required value="Bastrop"></label>
@@ -9,14 +11,10 @@
     <label>Census year<input name="census_year" type="number" required value="1950" min="1950" max="1950"></label>
     <label>Enumeration district<input name="enumeration_district" required placeholder="11-1"></label>
     <label>Source reference<input name="source_reference" placeholder="Authorized Ancestry export / collection ID"></label>
-    <label>Ground-truth workbook (optional)<input name="ground_truth_path" placeholder="data/ground_truth/...xlsx"></label>
-    <label>Ground-truth sheet (optional)<input name="ground_truth_sheet" placeholder="Bastrop 11-1"></label>
-    <label>Starting physical page (optional)<input name="ground_truth_page" type="number" min="1"></label>
+    <details class="advanced-fields"><summary>Optional ground-truth mapping</summary><div class="advanced-grid"><label>Workbook path<input name="ground_truth_path" placeholder="data/ground_truth/...xlsx"></label><label>Worksheet<input name="ground_truth_sheet" placeholder="Bastrop 11-1"></label><label>Starting physical page<input name="ground_truth_page" type="number" min="1" placeholder="Leave blank if unknown"></label></div></details>
     <label class="file-field">Image folder<input name="files" type="file" accept="image/*,.tif,.tiff" multiple webkitdirectory required></label>
-    <button type="submit">Import scans</button>
+    <button type="submit">Import and check pages</button>
   </form>
-</section>
-<section><h2>Existing batches</h2>
-{% if batches %}<div class="cards">{% for batch in batches %}<a class="card batch-card" href="/batches/{{ batch.id }}"><strong>{{ batch.name }}</strong><span>{{ batch.county }}, {{ batch.state }} · {{ batch.census_year }} · ED {{ batch.enumeration_district }}</span><span class="pill">{{ counts[batch.id] }} waiting for review</span></a>{% endfor %}</div>{% else %}<p class="muted">No scan batches have been imported.</p>{% endif %}
-</section>
+  </div>
+</details>
 {% endblock %}

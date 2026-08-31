@@ -74,9 +74,27 @@ def render_row_crop(image_path: str, line: int, schema) -> bytes:
 @app.get("/")
 def dashboard(request: Request):
     with SessionLocal() as session:
-        batches = session.scalars(select(Batch).order_by(Batch.created_at.desc())).all()
+        batches = session.scalars(select(Batch).options(joinedload(Batch.pages)).order_by(Batch.created_at.desc())).unique().all()
         counts = {batch.id: review_queue_count(session, batch.id) for batch in batches}
-        return TEMPLATES.TemplateResponse(request, "dashboard.html", {"batches": batches, "counts": counts})
+        summaries = {}
+        for batch in batches:
+            latest_run = session.scalar(select(ExtractionRun).where(ExtractionRun.batch_id == batch.id).order_by(ExtractionRun.created_at.desc()))
+            ready, _ = batch_ready(batch)
+            census_pages = sum(page.kind == "census" and not page.import_error for page in batch.pages)
+            summaries[batch.id] = {
+                "pages": census_pages,
+                "ready": ready,
+                "run_status": latest_run.status if latest_run else None,
+                "next_step": (
+                    f"Review {counts[batch.id]} flagged fields" if counts[batch.id]
+                    else "Resume the paused extraction" if latest_run and latest_run.status == "failed"
+                    else "Extraction is in progress" if latest_run and latest_run.status in {"queued", "running"}
+                    else "Ready to start extraction" if ready and not latest_run
+                    else "Confirm the page manifest" if not ready
+                    else "No review items are waiting"
+                ),
+            }
+        return TEMPLATES.TemplateResponse(request, "dashboard.html", {"batches": batches, "counts": counts, "summaries": summaries})
 
 
 @app.post("/batches")
