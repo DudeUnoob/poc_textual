@@ -56,14 +56,19 @@ def run_snapshot(session: Session, run: ExtractionRun) -> dict:
     if run.status == "completed":
         percent = 100
     failure = classify_failure(run.error)
+    terminal = run.status in TERMINAL_STATUSES
     last_update = progress.get("last_update")
     step_elapsed_seconds = None
-    if last_update:
+    if last_update and not terminal:
         try:
             updated_at = datetime.fromisoformat(last_update)
             step_elapsed_seconds = max(0, int((datetime.now(timezone.utc) - updated_at).total_seconds()))
         except (TypeError, ValueError):
             pass
+    elapsed_seconds = None
+    if run.started_at:
+        end = run.finished_at or datetime.now(timezone.utc).replace(tzinfo=None)
+        elapsed_seconds = max(0, int((end - run.started_at).total_seconds()))
     return {
         "run_id": run.id,
         "batch_id": run.batch_id,
@@ -85,13 +90,14 @@ def run_snapshot(session: Session, run: ExtractionRun) -> dict:
         "last_update": last_update,
         "server_time": now_iso(),
         "step_elapsed_seconds": step_elapsed_seconds,
+        "elapsed_seconds": elapsed_seconds,
         "possibly_stalled": run.status == "running" and (step_elapsed_seconds or 0) > 600,
         "events": progress.get("events") or [],
         "error": run.error,
         "failure_kind": failure["kind"] if failure else None,
         "action_required": failure["action_required"] if failure else None,
         "can_resume": run.status == "failed",
-        "terminal": run.status in TERMINAL_STATUSES,
+        "terminal": terminal,
     }
 
 

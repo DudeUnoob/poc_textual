@@ -111,6 +111,15 @@ def test_run_snapshot_exposes_queue_and_live_progress(tmp_path, monkeypatch):
         assert running["retry_count"] == 1
         assert running["step_elapsed_seconds"] is not None
 
+        run.status = "completed"
+        from datetime import datetime, timedelta
+        run.started_at = datetime.utcnow()
+        run.finished_at = run.started_at + timedelta(seconds=125)
+        completed = run_snapshot(session, run)
+        assert completed["terminal"] is True
+        assert completed["step_elapsed_seconds"] is None
+        assert completed["elapsed_seconds"] == 125
+
 
 def test_worker_restart_requeues_interrupted_run(tmp_path, monkeypatch):
     Batch, _, SessionLocal, *_ = _workbench(tmp_path, monkeypatch)

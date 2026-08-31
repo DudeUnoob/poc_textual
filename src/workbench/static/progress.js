@@ -22,7 +22,9 @@ document.querySelectorAll("[data-run-id]").forEach((card) => {
     setText("[data-api-attempt]", data.api_attempt ? `${data.api_attempt}/${data.max_api_attempts}` : "—");
     setText("[data-queue-position]", data.queue_position || "—");
     setText("[data-last-update]", data.last_update ? new Date(data.last_update).toLocaleTimeString() : "—");
-    setText("[data-step-elapsed]", data.step_elapsed_seconds == null ? "—" : formatDuration(data.step_elapsed_seconds));
+    setText("[data-time-label]", data.terminal ? "Run duration" : "Time in current step");
+    const displayedDuration = data.terminal ? data.elapsed_seconds : data.step_elapsed_seconds;
+    setText("[data-step-elapsed]", displayedDuration == null ? "—" : formatDuration(displayedDuration));
 
     const bar = card.querySelector("[data-progress-bar]");
     if (bar) {
