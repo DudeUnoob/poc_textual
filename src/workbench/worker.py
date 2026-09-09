@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -11,8 +10,9 @@ from sqlalchemy.orm import joinedload
 from extract import DEFAULT_MODEL, extract_with_review_data
 
 from .config import RUNS_DIR
-from .db import ExtractionRun, FieldCandidate, Page, SessionLocal, init_db
+from .db import ExtractionRun, FieldCandidate, Page, SessionLocal, init_db, utc_now
 from .progress import classify_failure, progress_data, update_progress
+from .schema import get_schema
 from .services import persist_extraction
 
 
@@ -42,7 +42,7 @@ def process_next_run() -> bool:
         run = session.scalar(select(ExtractionRun).where(ExtractionRun.status == "queued").order_by(ExtractionRun.created_at))
         if run is None:
             return False
-        run.status, run.started_at = "running", datetime.utcnow()
+        run.status, run.started_at = "running", utc_now()
         total_pages = session.scalar(select(func.count(Page.id)).where(
             Page.batch_id == run.batch_id, Page.kind == "census"
         )) or 0
@@ -112,19 +112,34 @@ def process_next_run() -> bool:
                     )
                     session.commit()
 
+                config = run.config or {}
+                sheet_name = page.batch.ground_truth_sheet
+                schema = get_schema(
+                    page.batch.census_year, page.batch.schedule_type, sheet_name,
+                )
+                raw_expected = config.get("expected_lines")
+                expected_lines = (
+                    int(raw_expected) if raw_expected is not None else schema.expected_lines
+                )
                 records, diagnostics, candidates = extract_with_review_data(
                     page.stored_path, page.batch.census_year,
-                    schedule_type=page.batch.schedule_type, model=model,
+                    schedule_type=page.batch.schedule_type,
+                    sheet_name=sheet_name,
+                    model=model,
                     event_callback=on_extraction_event,
-                    use_crops=bool((run.config or {}).get("use_crops", True)),
-                    expected_lines=int((run.config or {}).get("expected_lines", 30)),
-                    strategy=(run.config or {}).get("strategy", "adaptive_full_page"),
-                    n_blocks=int((run.config or {}).get("n_blocks", 3)),
-                    parallelism=int((run.config or {}).get("parallelism", 3)),
+                    use_crops=bool(config.get("use_crops", True)),
+                    expected_lines=expected_lines,
+                    strategy=config.get("strategy", "adaptive_full_page"),
+                    n_blocks=int(config.get("n_blocks", 3)),
+                    parallelism=int(config.get("parallelism", 3)),
+                    thinking=config.get("thinking_level"),
+                    max_output_tokens=config.get("max_output_tokens"),
                 )
                 payload = {"source_image": page.stored_path, "census_year": page.batch.census_year,
                            "schedule_type": page.batch.schedule_type,
-                           "model": model, "records": records, "diagnostics": diagnostics,
+                           "model": model,
+                           "thinking_level": config.get("thinking_level"),
+                           "records": records, "diagnostics": diagnostics,
                            "field_candidates": candidates}
                 output_path = RUNS_DIR / f"run_{run_id}" / f"page_{page.id}.json"
                 output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +158,7 @@ def process_next_run() -> bool:
                            "message": f"Committed {len(candidates)} review fields"},
                 )
                 session.commit()
-            run.status, run.finished_at = "completed", datetime.utcnow()
+            run.status, run.finished_at = "completed", utc_now()
             update_progress(
                 run,
                 phase="completed",
@@ -160,7 +175,7 @@ def process_next_run() -> bool:
     except RunCancelled:
         with SessionLocal() as session:
             run = session.get(ExtractionRun, run_id)
-            run.status, run.error, run.finished_at = "cancelled", None, datetime.utcnow()
+            run.status, run.error, run.finished_at = "cancelled", None, utc_now()
             update_progress(
                 run, phase="cancelled",
                 message="Stopped safely; the fast replacement run is next",
@@ -171,7 +186,7 @@ def process_next_run() -> bool:
     except Exception as exc:
         with SessionLocal() as session:
             run = session.get(ExtractionRun, run_id)
-            run.status, run.error, run.finished_at = "failed", str(exc), datetime.utcnow()
+            run.status, run.error, run.finished_at = "failed", str(exc), utc_now()
             failure = classify_failure(str(exc))
             update_progress(
                 run,
@@ -186,6 +201,12 @@ def process_next_run() -> bool:
 
 
 def main() -> None:
+    from .settings import is_firebase
+
+    if is_firebase():
+        from .worker_cloud import main as cloud_main
+        cloud_main()
+        return
     init_db()
     recovered = recover_interrupted_runs()
     print(f"Census review worker started (recovered {recovered} interrupted run(s))")

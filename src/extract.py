@@ -1,7 +1,7 @@
 """
 Census image -> structured JSON records via the Gemini vision API.
 
-Primary model: gemini-3.5-flash. No GPU required; stateless API calls.
+Primary model: gemini-3.8-flash. No GPU required; stateless API calls.
 Pipeline: concurrent row-block crops, reconcile by line number, one targeted
 retry for gaps, then per-decade normalization. The legacy adaptive full-page
 strategy remains available for benchmark comparisons. Emits the
@@ -37,14 +37,9 @@ from utils import (BIRTHPLACE_COLUMN, GENDER_COLUMN, normalize_gender,
 
 load_dotenv()
 
-DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
-DEFAULT_TEMPERATURE = float(os.environ.get("GEMINI_TEMPERATURE", "0.0"))
+from model_config import DEFAULT_MODEL, DEFAULT_MAX_OUTPUT_TOKENS, thinking_level
+
 MAX_RETRIES_API = 3
-# Thinking-tier models spend output-token budget on internal reasoning before
-# emitting the actual JSON; bounding thinking_budget and giving max_output_tokens
-# plenty of headroom keeps a full ~30-record page from being truncated mid-string.
-DEFAULT_THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "0"))
-DEFAULT_MAX_OUTPUT_TOKENS = int(os.environ.get("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
 
 def get_client() -> genai.Client:
     """Build a Gemini client from GEMINI_API_KEY (or GOOGLE_API_KEY)."""
@@ -56,34 +51,35 @@ def get_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def load_prompt(year: int, schedule_type: str = "population") -> tuple[str, str]:
+def load_prompt(year: int, schedule_type: str = "population", sheet_name: str | None = None) -> tuple[str, str]:
     """Load system + per-decade user prompt."""
     system = (PROMPTS_DIR / "system.txt").read_text()
-    form_file = PROMPTS_DIR / f"{year}_{schedule_type}.txt"
-    decade_file = form_file if form_file.exists() else PROMPTS_DIR / f"{year}.txt"
-    user = decade_file.read_text() if decade_file.exists() else (PROMPTS_DIR / "generic.txt").read_text()
-    user += (
-        "\n\nReturn the object shape required by the response schema, with records "
-        "as the list. Always populate line_number with the physical row position "
-        "for extraction-pass reconciliation; downstream export omits it when the "
-        "ground-truth workbook has no Line Number column."
+    _, _, fields = get_year_models(year, schedule_type, sheet_name)
+    user = (
+        f"Transcribe this {year} U.S. Census {schedule_type} schedule from "
+        "Bastrop County, Texas. The scan is the only evidence for answers. "
+        "Return one JSON object containing a records array using the response schema. "
+        "Use null for blank, unreadable, or inapplicable fields; never infer race or "
+        "ethnicity from names, and never manufacture research annotations. "
+        "Always provide line_number: the printed line number when present, otherwise "
+        "the physical row position on this page, including gaps. Do not renumber "
+        "records after omitting an unreadable row. Include visible supplementary "
+        "answers on their associated person only. The exact output-key to workbook "
+        "field mapping is:\n" + json.dumps(fields, ensure_ascii=False)
     )
     return system, user
 
 
 def _config(system_prompt: str, model: str,
             max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
-            response_schema: type[BaseModel] = ExtractionBatch) -> types.GenerateContentConfig:
-    thinking_budget = DEFAULT_THINKING_BUDGET
-    if "pro" in model.casefold() and thinking_budget == 0:
-        thinking_budget = 1024
+            response_schema: type[BaseModel] = ExtractionBatch,
+            thinking: str | None = None) -> types.GenerateContentConfig:
     return types.GenerateContentConfig(
         system_instruction=system_prompt,
-        temperature=DEFAULT_TEMPERATURE,
         response_mime_type="application/json",
         response_schema=response_schema,
         media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
-        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+        thinking_config=types.ThinkingConfig(thinking_level=thinking_level(thinking)),
         max_output_tokens=max_output_tokens,
     )
 
@@ -91,18 +87,23 @@ def _config(system_prompt: str, model: str,
 def call_gemini(client: genai.Client, model: str, system_prompt: str,
                 user_prompt: str, image_bytes: bytes, mime_type: str,
                 event_callback: Callable[[dict], None] | None = None,
-                source_label: str = "full_page", year: int = 1950,
+                source_label: str = "full_page", year: int | None = None,
                 schedule_type: str = "population",
-                line_range: tuple[int, int] | None = None) -> list[BaseModel]:
+                line_range: tuple[int, int] | None = None,
+                sheet_name: str | None = None,
+                thinking: str | None = None,
+                max_output_tokens: int | None = None) -> list[BaseModel]:
     """One schema-constrained Gemini call. Returns parsed person records."""
-    _, batch_model, _ = get_year_models(year, schedule_type)
-    schema = get_census_schema(year, schedule_type)
+    if year is None:
+        raise ValueError("census year is required for schema-safe extraction")
+    _, batch_model, _ = get_year_models(year, schedule_type, sheet_name)
+    schema = get_census_schema(year, schedule_type, sheet_name)
     contents = [
         types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
         types.Part.from_text(text=user_prompt),
     ]
     last_err: Exception | None = None
-    output_token_budget = DEFAULT_MAX_OUTPUT_TOKENS
+    output_token_budget = int(max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS)
     attempts_used = 0
     for attempt in range(1, MAX_RETRIES_API + 1):
         attempts_used = attempt
@@ -120,19 +121,17 @@ def call_gemini(client: genai.Client, model: str, system_prompt: str,
                     system_prompt, model,
                     max_output_tokens=output_token_budget,
                     response_schema=batch_model,
+                    thinking=thinking,
                 ),
             )
             parsed = response.parsed
-            if isinstance(parsed, batch_model):
-                records = parsed.records
+            if parsed is not None and hasattr(parsed, "records"):
+                records = list(parsed.records)
             else:
                 data = json.loads(response.text)
                 records = batch_model.model_validate(data).records
-            if not schema.has_ground_truth_line_number:
-                first_line = line_range[0] if line_range else 1
-                for offset, record in enumerate(records):
-                    if record.line_number is None:
-                        record.line_number = first_line + offset
+            if any(record.line_number is None for record in records):
+                raise ValueError("Extraction must include physical line_number for every record")
             if event_callback:
                 event_callback({
                     "type": "api_success", "source": source_label,
@@ -192,7 +191,7 @@ def _post_process(records: list[dict], year: int) -> list[dict]:
 
 
 def _flagged_lines(
-    full_records: list[BaseModel], expected_lines: int
+    full_records: list[BaseModel], expected_lines: int, line_start: int = 1
 ) -> list[int]:
     """Lines the full-page pass didn't confidently read.
 
@@ -202,7 +201,7 @@ def _flagged_lines(
     """
     by_line = {r.line_number: r for r in full_records if r.line_number is not None}
     return [
-        ln for ln in range(1, expected_lines + 1)
+        ln for ln in range(line_start, line_start + expected_lines)
         if ln not in by_line or by_line[ln].legibility != Legibility.clear
     ]
 
@@ -238,12 +237,12 @@ def _cluster_flagged_lines(
 
 
 def _line_crop(image_path: str, schema: CensusSchema, lo_line: int, hi_line: int,
-               expected_lines: int, label: str) -> Crop:
+               expected_lines: int, label: str, line_start: int = 1) -> Crop:
     """Crop census lines using the decade's actual table bounds."""
     data_top, data_bottom = schema.data_top, schema.data_bottom
     span = data_bottom - data_top
-    lo = data_top + span * (lo_line - 1) / expected_lines
-    hi = data_top + span * hi_line / expected_lines
+    lo = data_top + span * (lo_line - line_start) / expected_lines
+    hi = data_top + span * (hi_line - line_start + 1) / expected_lines
     return make_targeted_crop(image_path, lo, hi, label=label)
 
 
@@ -267,6 +266,9 @@ def _extract_row_blocks(
     event_callback: Callable[[dict], None] | None,
     parallelism: int,
     schema: CensusSchema,
+    line_start: int = 1,
+    thinking: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> dict[str, list[BaseModel]]:
     """Read small row bands concurrently to avoid one huge, slow JSON response."""
     crops = make_row_block_crops(
@@ -275,8 +277,8 @@ def _extract_row_blocks(
     )
     tasks: list[tuple[Crop, int, int]] = []
     for index, crop in enumerate(crops):
-        lo_line = (index * expected_lines) // n_blocks + 1
-        hi_line = ((index + 1) * expected_lines) // n_blocks
+        lo_line = (index * expected_lines) // n_blocks + line_start
+        hi_line = ((index + 1) * expected_lines) // n_blocks + line_start - 1
         tasks.append((crop, lo_line, hi_line))
 
     def read(task: tuple[Crop, int, int], callback) -> tuple[str, list[BaseModel]]:
@@ -287,8 +289,9 @@ def _extract_row_blocks(
             _row_block_prompt(user_prompt, lo_line, hi_line),
             crop.image_bytes, crop.mime_type,
             event_callback=callback, source_label=crop.label,
-            year=year, schedule_type=schema.schedule_type,
+            year=year, schedule_type=schema.schedule_type, sheet_name=schema.sheet_name,
             line_range=(lo_line, hi_line),
+            thinking=thinking, max_output_tokens=max_output_tokens,
         )
         return crop.label, records
 
@@ -335,10 +338,9 @@ def _extract_row_blocks(
 def _review_candidates(
     merged: list[BaseModel], raw_records: list[dict], normalized_records: list[dict],
     diagnostics: dict, expected_lines: int,
-    field_map: dict[str, str] | None = None,
+    field_map: dict[str, str],
 ) -> list[dict]:
     """Build a lossless field-level sidecar for the human review workbench."""
-    field_map = field_map or get_year_models(1950)[2]
     candidates: list[dict] = []
     conflicts = diagnostics.get("conflict_fields_by_line", {})
     sources = diagnostics.get("line_sources", {})
@@ -357,8 +359,6 @@ def _review_candidates(
                 confidence = "low"
             elif declared is not None:
                 confidence = declared.value if isinstance(declared, FieldConfidence) else str(declared)
-            elif person.legibility == Legibility.clear and value not in (None, ""):
-                confidence = "high"
             elif person.legibility == Legibility.illegible:
                 confidence = "low"
             else:
@@ -399,23 +399,30 @@ def extract_with_review_data(
     strategy: str = "adaptive_full_page",
     parallelism: int = 3,
     schedule_type: str = "population",
+    sheet_name: str | None = None,
+    line_start: int = 1,
+    thinking: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> tuple[list[dict], dict, list[dict]]:
     """Extract one page and return canonical records plus review provenance."""
-    schema = get_census_schema(year, schedule_type)
+    schema = get_census_schema(year, schedule_type, sheet_name)
     expected_lines = expected_lines or schema.expected_lines
-    _, _, field_map = get_year_models(year, schedule_type)
+    if line_start < 1 or expected_lines < 1:
+        raise ValueError("line_start and expected_lines must be positive")
+    if not schema.geometry_validated:
+        use_crops = False
+        strategy = "adaptive_full_page"
+    _, _, field_map = get_year_models(year, schedule_type, sheet_name)
     if client is None and strategy != "row_blocks":
         client = get_client()
-    system_prompt, user_prompt = (
-        load_prompt(year)
-        if schedule_type == "population"
-        else load_prompt(year, schedule_type)
-    )
+    system_prompt, user_prompt = load_prompt(year, schedule_type, sheet_name)
+    user_prompt += f"\nThis page covers physical line numbers {line_start} through {line_start + expected_lines - 1}."
 
     if strategy == "row_blocks":
         per_source = _extract_row_blocks(
             image_path, year, model, system_prompt, user_prompt,
-            expected_lines, n_blocks, client, event_callback, parallelism, schema,
+            expected_lines, n_blocks, client, event_callback, parallelism, schema, line_start,
+            thinking=thinking, max_output_tokens=max_output_tokens,
         )
         full_records: list[BaseModel] = []
     else:
@@ -423,25 +430,27 @@ def extract_with_review_data(
         full_records = call_gemini(
             client, model, system_prompt, user_prompt, page_bytes, page_mime,
             event_callback=event_callback, source_label="full_page",
-            year=year, schedule_type=schedule_type,
+            year=year, schedule_type=schedule_type, sheet_name=sheet_name,
+            thinking=thinking, max_output_tokens=max_output_tokens,
         )
         per_source = {"full_page": full_records}
 
     if use_crops and strategy != "row_blocks":
-        flagged = _flagged_lines(full_records, expected_lines)
+        flagged = _flagged_lines(full_records, expected_lines, line_start)
         if flagged:
             for i, (lo_line, hi_line) in enumerate(
                 _cluster_flagged_lines(flagged, max_clusters=n_blocks)
             ):
                 crop = _line_crop(
                     image_path, schema, lo_line, hi_line, expected_lines,
-                    label=f"crop_{i + 1}",
+                    label=f"crop_{i + 1}", line_start=line_start,
                 )
                 crop_records = call_gemini(
                     client, model, system_prompt, user_prompt, crop.image_bytes, crop.mime_type,
                     event_callback=event_callback, source_label=crop.label,
-                    year=year, schedule_type=schedule_type,
+                    year=year, schedule_type=schedule_type, sheet_name=sheet_name,
                     line_range=(lo_line, hi_line),
+                    thinking=thinking, max_output_tokens=max_output_tokens,
                 )
                 per_source[crop.label] = crop_records
 
@@ -449,27 +458,30 @@ def extract_with_review_data(
         """Targeted retry: crop the page region covering the missing lines."""
         crop = _line_crop(
             image_path, schema, min(missing_lines), max(missing_lines),
-            expected_lines, label="retry",
+            expected_lines, label="retry", line_start=line_start,
         )
         return call_gemini(
             client or get_client(), model, system_prompt,
             _row_block_prompt(user_prompt, min(missing_lines), max(missing_lines)),
             crop.image_bytes, crop.mime_type,
             event_callback=event_callback, source_label="targeted_retry",
-            year=year, schedule_type=schedule_type,
+            year=year, schedule_type=schedule_type, sheet_name=sheet_name,
             line_range=(min(missing_lines), max(missing_lines)),
+            thinking=thinking, max_output_tokens=max_output_tokens,
         )
 
     merged, diagnostics = reconcile_page(
-        per_source, expected_lines=expected_lines, retry_fn=retry_fn if use_crops else None
+        per_source, expected_lines=expected_lines, retry_fn=retry_fn if use_crops else None, line_start=line_start
     )
 
     raw_records = [
-        to_year_gt_record(p, year, schedule_type)
+        to_year_gt_record(p, year, schedule_type, sheet_name)
         for p in merged
     ]
     records = _post_process([dict(record) for record in raw_records], year)
     diagnostics_data = diagnostics.model_dump()
+    diagnostics_data["coverage"] = diagnostics.coverage
+    diagnostics_data["coverage_pct"] = round(diagnostics.coverage * 100, 1)
     return records, diagnostics_data, _review_candidates(
         merged, raw_records, records, diagnostics_data, expected_lines, field_map
     )
@@ -487,10 +499,12 @@ def extract_from_image(
     strategy: str = "adaptive_full_page",
     parallelism: int = 3,
     schedule_type: str = "population",
+    sheet_name: str | None = None,
+    line_start: int = 1,
 ) -> tuple[list[dict], dict]:
     """Backward-compatible extraction interface used by CLI and tests."""
     records, diagnostics, _ = extract_with_review_data(
-        image_path, year, schedule_type=schedule_type, client=client,
+        image_path, year, schedule_type=schedule_type, sheet_name=sheet_name, line_start=line_start, client=client,
         model=model, use_crops=use_crops,
         n_blocks=n_blocks, expected_lines=expected_lines,
         event_callback=event_callback,
@@ -501,19 +515,23 @@ def extract_from_image(
 
 def process_sheet(image_path: str, year: int, output_path: str,
                   use_crops: bool = True, model: str = DEFAULT_MODEL,
-                  schedule_type: str = "population") -> list[dict]:
+                  schedule_type: str = "population", sheet_name: str | None = None,
+                  line_start: int = 1) -> list[dict]:
     """Extract one sheet and save the canonical JSON envelope."""
     print(f"Extracting: {image_path} (year={year}, model={model})")
     client = get_client()
     records, diagnostics, field_candidates = extract_with_review_data(
         image_path, year, client=client, model=model, use_crops=use_crops,
-        schedule_type=schedule_type,
+        schedule_type=schedule_type, sheet_name=sheet_name, line_start=line_start,
     )
     output = {
         "source_image": str(image_path),
         "census_year": year,
         "schedule_type": schedule_type,
         "model": model,
+        "thinking_level": thinking_level(),
+        "sheet_name": sheet_name,
+        "line_start": line_start,
         "record_count": len(records),
         "records": records,
         "diagnostics": diagnostics,
@@ -537,9 +555,11 @@ if __name__ == "__main__":
     parser.add_argument("--schedule", choices=["population", "slave"],
                         default="population")
     parser.add_argument("--no-crops", action="store_true")
+    parser.add_argument("--sheet-name")
+    parser.add_argument("--line-start", type=int, default=1)
     args = parser.parse_args()
     process_sheet(
         args.image, args.year, args.output,
         use_crops=not (args.no_crops or args.legacy_mode == "nocrops"),
-        model=args.model, schedule_type=args.schedule,
+        model=args.model, schedule_type=args.schedule, sheet_name=args.sheet_name, line_start=args.line_start,
     )

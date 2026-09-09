@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Review {{ candidate.field_name }} · Workbench{% endblock %}
 {% block content %}
+{% from "image_viewer.html" import viewer %}
 <a class="back" href="/batches/{{ batch.id }}">← {{ batch.name }}</a>
 <div class="review-head">
   <div><span class="eyebrow">Page {{ page.page_number }} · Line {{ candidate.line_number }}</span><h1>Review {{ candidate.field_name }}</h1><p><strong>{{ queue_count }}</strong> fields remaining · <span class="pill">{{ candidate.status|replace('_', ' ') }}</span></p></div>
@@ -9,15 +10,21 @@
 <section class="review-layout">
   <div class="evidence">
     <div class="evidence-heading"><div><span class="eyebrow">Focused evidence</span><h2>{{ candidate.field_name }}</h2></div><span>Line {{ candidate.line_number }}</span></div>
-    <div class="focus-frame"><img class="field-crop" src="/pages/{{ page.id }}/crop?line={{ candidate.line_number }}&field={{ candidate.field_name|urlencode }}" alt="Focused {{ candidate.field_name }} handwriting on census row {{ candidate.line_number }}"></div>
-    <details open><summary>Row context</summary><div class="row-frame"><img class="row-crop" src="/pages/{{ page.id }}/crop?line={{ candidate.line_number }}" alt="Complete census row {{ candidate.line_number }}"></div></details>
-    <details><summary>Full page scan</summary><img class="full-page" src="/pages/{{ page.id }}/image" alt="Full census page"></details>
+    {% if geometry_validated %}
+    {{ viewer('/pages/' ~ page.id ~ '/crop?line=' ~ candidate.line_number ~ '&field=' ~ (candidate.field_name|urlencode), 'Focused handwriting', true) }}
+    {% endif %}
+    {{ viewer('/pages/' ~ page.id ~ '/image', 'Full census page, line ' ~ candidate.line_number) }}
   </div>
   <div class="decision card">
     <div class="decision-heading"><div><span class="eyebrow">AI draft</span><h2>{{ candidate.raw_value if candidate.raw_value is not none else 'No value detected' }}</h2></div><span class="confidence confidence-{{ candidate.model_confidence }}">{{ candidate.model_confidence }}</span></div>
     <dl><dt>Normalized value</dt><dd>{{ candidate.normalized_value if candidate.normalized_value is not none else '—' }}</dd><dt>Why this needs review</dt><dd>{{ review_reasons|join('; ') or 'Quality-control sample' }}</dd><dt>Extraction source</dt><dd>{{ candidate.source_pass|replace('_', ' ') }} · row {{ candidate.row_legibility }}</dd></dl>
     <form method="post" action="/candidates/{{ candidate.id }}/decision" data-review-form>
+      {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+      {% if current_user %}
+      <p class="muted">Reviewing as <strong>{{ current_user.email }}</strong></p>
+      {% else %}
       <label>Reviewer name / initials<input name="reviewer" required autocomplete="name" data-reviewer></label>
+      {% endif %}
       <label>Best reading<input name="value" value="{{ candidate.normalized_value or '' }}" data-review-value></label>
       <details class="rationale-field"><summary>Add a rationale</summary><label>Decision note (optional)<textarea name="rationale" rows="2" placeholder="Why you changed or deferred this field"></textarea></label></details>
       <div class="decision-actions">
@@ -32,4 +39,6 @@
 </section>
 <section class="card line-context"><div class="section-heading"><div><h2>Line {{ candidate.line_number }} context</h2><p class="muted">Other AI readings from this person’s row.</p></div></div><div class="context-grid">{% for field in line_fields %}<div class="context-field {% if field.id == candidate.id %}active-context{% endif %}"><span>{{ field.field_name }}</span><strong>{{ field.normalized_value if field.normalized_value is not none else '—' }}</strong></div>{% endfor %}</div></section>
 <script src="/static/review.js" defer></script>
+<script src="/static/image-viewer.js" defer></script>
+<link rel="stylesheet" href="/static/image-viewer.css">
 {% endblock %}

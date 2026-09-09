@@ -1,8 +1,12 @@
 """Single source of truth for supported census forms."""
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, replace
+from functools import lru_cache
+from pathlib import Path
+
+from workbook_catalog import canonical_field
 
 
 @dataclass(frozen=True)
@@ -16,6 +20,9 @@ class CensusSchema:
     data_top: float = 0.0
     data_bottom: float = 1.0
     field_bounds: dict[str, tuple[float, float]] = field(default_factory=dict)
+    sheet_name: str | None = None
+    catalog_version: str | None = None
+    geometry_validated: bool = False
     row_bounds: tuple[float, float] = (0.0, 1.0)
 
 
@@ -140,6 +147,7 @@ def _population_schema(year: int) -> CensusSchema:
         data_bottom=0.645 if year == 1950 else 1.0,
         field_bounds=FIELD_BOUNDS_1950 if year == 1950 else {},
         row_bounds=(0.245, 0.775) if year == 1950 else (0.0, 1.0),
+        geometry_validated=year == 1950,
     )
 
 
@@ -152,8 +160,7 @@ for year in (1850, 1860):
         year=year,
         schedule_type="slave",
         columns=(
-            "Name", "Slave Owner Name", "Age", "Birth Date", "Gender", "Race",
-            "Fugitive", "Manumitted",
+            "Slave Owner Name", "Age", "Gender", "Race", "Fugitive", "Manumitted",
         ),
         priority_fields=("Slave Owner Name", "Age", "Gender", "Race"),
         expected_lines=40,
@@ -162,36 +169,103 @@ for year in (1850, 1860):
 
 SUPPORTED_YEARS = tuple(sorted(EXPECTED_LINES))
 SUPPORTED_FORMS = tuple(sorted(SCHEMAS))
+_CATALOG_PATH = Path(__file__).resolve().parent.parent / "schemas" / "workbook_catalog.json"
 
 
+@lru_cache(maxsize=1)
+def _workbook_catalog() -> dict:
+    return json.loads(_CATALOG_PATH.read_text())
+
+
+def _catalog_image_headers(
+    year: int,
+    schedule_type: str,
+    sheet_name: str | None,
+) -> tuple[str, ...]:
+    catalog = _workbook_catalog()
+    try:
+        sheets = catalog["workbooks"][str(year)]["sheets"]
+    except KeyError as exc:
+        raise ValueError(f"No workbook catalog for {year}.") from exc
+    if sheet_name is not None:
+        if sheet_name not in sheets or sheets[sheet_name]["schedule_type"] != schedule_type:
+            raise ValueError(
+                f"Unknown or incompatible workbook sheet: {year} {schedule_type} {sheet_name}"
+            )
+        selected = [sheets[sheet_name]]
+    else:
+        selected = [
+            sheet for sheet in sheets.values()
+            if sheet["schedule_type"] == schedule_type
+        ]
+    columns_by_id: dict[str, str] = {}
+    for sheet in selected:
+        for column in sheet["fields"]:
+            if column.get("mapping_issue") and sheet_name is not None:
+                raise ValueError(
+                    f"Ambiguous mapping for {column['header']} in {sheet_name}"
+                )
+            if column["classification"] != "image" or column.get("mapping_issue"):
+                continue
+            columns_by_id.setdefault(column["field_id"], column["header"])
+    return tuple(columns_by_id.values())
+
+
+@lru_cache(maxsize=None)
 def get_census_schema(
     year: int,
     schedule_type: str = "population",
+    sheet_name: str | None = None,
 ) -> CensusSchema:
     try:
-        return SCHEMAS[(year, schedule_type)]
+        base = SCHEMAS[(year, schedule_type)]
     except KeyError as exc:
         raise ValueError(
             f"Unsupported census form: {year} {schedule_type}. "
             f"Supported forms: {SUPPORTED_FORMS}."
         ) from exc
+    catalog = _workbook_catalog()
+    columns = _catalog_image_headers(year, schedule_type, sheet_name)
+    priority_ids = {canonical_field(column) for column in base.priority_fields}
+    priority = tuple(column for column in columns if canonical_field(column) in priority_ids)
+    geometry_validated = base.geometry_validated or bool(base.field_bounds)
+    return replace(
+        base,
+        columns=columns,
+        priority_fields=priority,
+        sheet_name=sheet_name,
+        catalog_version=catalog["catalog_sha256"],
+        geometry_validated=geometry_validated,
+        field_bounds=base.field_bounds if geometry_validated else {},
+        data_top=base.data_top if geometry_validated else 0.0,
+        data_bottom=base.data_bottom if geometry_validated else 1.0,
+        row_bounds=base.row_bounds if geometry_validated else (0.0, 1.0),
+    )
 
 
 def schema_field_name(column: str) -> str:
-    overrides = {
-        "Relation to Head of House": "relation_to_head",
-        "Relation to Head": "relation_to_head",
-        "Birth Place": "birth_place",
-        "Father's Birth Place": "father_birth_place",
-        "Father's Birthplace": "father_birthplace",
-        "Mother's Birth Place": "mother_birth_place",
-        "Mother's Birthplace": "mother_birthplace",
-        "Cannot Read, Write": "cannot_read_write",
-    }
-    if column in overrides:
-        return overrides[column]
-    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", column.casefold())).strip("_")
+    return canonical_field(column)
 
 
 def field_mapping(schema: CensusSchema) -> dict[str, str]:
     return {schema_field_name(column): column for column in schema.columns}
+
+
+def workbook_sheets(year: int, schedule_type: str = "population") -> tuple[str, ...]:
+    """Return catalog worksheets available for an upload profile."""
+    try:
+        sheets = _workbook_catalog()["workbooks"][str(year)]["sheets"]
+    except KeyError as exc:
+        raise ValueError(f"No workbook catalog for {year}.") from exc
+    return tuple(
+        name
+        for name, metadata in sheets.items()
+        if metadata["schedule_type"] == schedule_type
+    )
+
+
+def workbook_filename(year: int) -> str:
+    try:
+        return str(_workbook_catalog()["workbooks"][str(year)]["file"])
+    except KeyError as exc:
+        raise ValueError(f"No workbook catalog for {year}.") from exc

@@ -7,3 +7,13 @@ data/raw_images
 data/outputs
 data/workbench
 results
+
+.venv
+.env
+.env.*
+!.env.example
+*adminsdk*.json
+*serviceAccount*.json
+credentials*.json
+.codex
+.gstack

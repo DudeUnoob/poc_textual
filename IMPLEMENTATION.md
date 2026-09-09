@@ -1,16 +1,18 @@
 # Implementation
 
-> **Architecture note (current): Gemini 3.1 Pro, API-only, no GPU.**
+> **Architecture note (current): Gemini 3.8 Flash, API-only, no GPU.**
 >
-> The extraction backend was migrated from self-hosted Qwen2.5-VL (Colab GPU)
-> and the earlier Claude path to Google **Gemini 3.1 Pro** (`gemini-3.1-pro-preview`)
-> via the `google-genai` SDK. There is no GPU or model download; extraction is a
-> stateless API call authenticated with `GEMINI_API_KEY`.
+> New extraction runs use Google **Gemini 3.8 Flash** (`gemini-3.8-flash`) via
+> the `google-genai` SDK. Runs persist model, thinking level, prompt version,
+> source manifest, and workbook catalog identity. There is no GPU or model
+> download; extraction is a stateless API call authenticated with
+> `GEMINI_API_KEY`.
 >
 > **Module map (see `src/`):**
-> - `models.py` - Pydantic contracts (`PersonRecord1950`, `ExtractionBatch`,
->   `PageDiagnostics`) used as the Gemini `response_schema` and mapped to exact
->   ground-truth column names via `FIELD_TO_GT_COLUMN_1950` / `to_gt_record`.
+> - `workbook_catalog.py` / `census_schemas.py` - cleaned-XLSX field catalog,
+>   stable aliases, per-sheet exact labels/order, and form geometry.
+> - `models.py` - dynamic per-year/schedule Pydantic contracts used as Gemini
+>   `response_schema`, plus legacy 1950 compatibility types.
 > - `preprocess.py` - `prepare_full_page` (light CLAHE enhance, no binarization)
 >   and `make_row_block_crops` / `make_targeted_crop` (overlapping bands that keep
 >   the left-margin line numbers visible).
@@ -35,11 +37,10 @@
 > python -m pytest tests/ -q
 > ```
 >
-> **Cost / retries:** Gemini 3.1 Pro is roughly $2 / 1M input tokens and
-> $12 / 1M output tokens (<200k-token requests). Each page uses one full-page
-> call plus N crop calls (default 3) plus at most one targeted retry, so budget
-> ~4-5 calls per page. `call_gemini` retries transient API errors with
-> exponential backoff (`MAX_RETRIES_API`).
+> **Cost / retries:** Price assumptions are intentionally not hardcoded here.
+> Each page uses the selected extraction strategy plus at most one targeted
+> retry. Operator-configured page/model-call budgets bound spend, and
+> `call_gemini` retries transient API errors with exponential backoff.
 >
 > The sections below are retained for historical context on the earlier
 > Claude/Qwen implementation and the data-quality investigation.

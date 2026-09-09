@@ -5,6 +5,7 @@
 <div class="cards batch-grid">{% for batch in batches %}{% set summary = summaries[batch.id] %}<a class="card batch-card" href="/batches/{{ batch.id }}"><div class="batch-card-head"><strong>{{ batch.name }}</strong>{% if summary.run_status %}<span class="status-dot status-{{ summary.run_status }}">{{ summary.run_status }}</span>{% endif %}</div><span>{{ batch.county }}, {{ batch.state }} · ED {{ batch.enumeration_district }}</span><div class="batch-stats"><span><strong>{{ summary.pages }}</strong> census pages</span><span><strong>{{ counts[batch.id] }}</strong> rows to review</span></div><span class="next-step">{{ summary.next_step }} <b aria-hidden="true">→</b></span></a>{% endfor %}</div></section>{% endif %}
 <details class="card import-panel" {% if not batches %}open{% endif %}><summary><span><strong>{% if batches %}Import another batch{% else %}Import your first scan batch{% endif %}</strong><small>Select a local folder of authorized census images.</small></span></summary><div class="import-body"><p class="muted">Filename order is only a hint. You will confirm page numbers and identify covers before extraction starts.</p>
   <form method="post" action="/batches" enctype="multipart/form-data" class="form-grid">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
     <label>Batch name<input name="name" required placeholder="Bastrop ED 11-1"></label>
     <label>County<input name="county" required value="Bastrop"></label>
     <label>State<input name="state" required value="Texas"></label>
@@ -12,10 +13,28 @@
     <label>Schedule type<select name="schedule_type"><option value="population">Population</option><option value="slave">Slave schedule (1850/1860)</option></select></label>
     <label>Enumeration district<input name="enumeration_district" required placeholder="11-1"></label>
     <label>Source reference<input name="source_reference" placeholder="Authorized Ancestry export / collection ID"></label>
-    <details class="advanced-fields"><summary>Optional ground-truth mapping</summary><div class="advanced-grid"><label>Workbook path<input name="ground_truth_path" placeholder="data/ground_truth/...xlsx"></label><label>Worksheet<input name="ground_truth_sheet" placeholder="Bastrop 11-1"></label><label>Starting physical page<input name="ground_truth_page" type="number" min="1" placeholder="Leave blank if unknown"></label></div></details>
+    <details class="advanced-fields"><summary>Ground-truth mapping</summary><div class="advanced-grid"><label>Workbook path<input name="ground_truth_path" placeholder="data/ground_truth/...xlsx"></label><label>Validated worksheet<input name="ground_truth_sheet" list="workbook-sheets" placeholder="Select the Bastrop district sheet"><datalist id="workbook-sheets"></datalist></label><label>Starting physical page<input name="ground_truth_page" type="number" min="1" placeholder="Leave blank if unknown"></label></div><p class="muted">The selected cleaned worksheet drives exact fields, labels, and export order. The scan remains the transcription evidence.</p></details>
     <label class="file-field">Image folder<input name="files" type="file" accept="image/*,.tif,.tiff" multiple webkitdirectory required></label>
     <button type="submit">Import and check pages</button>
   </form>
   </div>
 </details>
+<script>
+(() => {
+  const form = document.querySelector('form[action="/batches"]');
+  const year = form?.elements.namedItem("census_year");
+  const schedule = form?.elements.namedItem("schedule_type");
+  const list = document.getElementById("workbook-sheets");
+  if (!year || !schedule || !list) return;
+  const refresh = async () => {
+    const response = await fetch(`/api/workbook-sheets?year=${encodeURIComponent(year.value)}&schedule_type=${encodeURIComponent(schedule.value)}`);
+    if (!response.ok) return;
+    const payload = await response.json();
+    list.replaceChildren(...payload.sheets.map(name => Object.assign(document.createElement("option"), {value: name})));
+  };
+  year.addEventListener("change", refresh);
+  schedule.addEventListener("change", refresh);
+  refresh();
+})();
+</script>
 {% endblock %}

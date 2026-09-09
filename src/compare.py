@@ -28,6 +28,7 @@ from fuzzywuzzy import fuzz
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from census_schemas import get_census_schema
+from workbook_catalog import canonical_field
 from paths import RESULTS_DIR
 
 # Keyword → match strategy. Order matters: more specific keywords first.
@@ -53,6 +54,8 @@ def classify_strategy(field_name: str) -> str:
     for keywords, strategy in STRATEGY_KEYWORDS:
         if any(k in fl for k in keywords):
             return strategy
+    if "number" in fl or fl in {"hours worked", "weeks worked", "income", "family number"}:
+        return "numeric_exact"
     return "fuzzy"  # default for anything else compared
 
 
@@ -68,6 +71,11 @@ def field_match(ext_val, gt_val, strategy: str) -> bool:
         return True
     if e == "" or g == "":
         return False
+    if strategy == "numeric_exact":
+        try:
+            return float(e) == float(g)
+        except (ValueError, TypeError):
+            return e == g
     if strategy == "exact":
         return e == g
     if strategy in ("fuzzy", "fuzzy_name"):
@@ -92,7 +100,7 @@ def find_line_number_column(columns) -> str | None:
     return None
 
 
-def split_into_physical_pages(gt_df: pd.DataFrame, line_col: str) -> list[pd.DataFrame]:
+def split_into_physical_pages(gt_df: pd.DataFrame, line_col: str, *, year: int | None = None) -> list[pd.DataFrame]:
     """
     A ground-truth sheet concatenates many physical census pages. Line Number
     resets to 1 at the start of each new page -- detect those resets and
@@ -103,7 +111,8 @@ def split_into_physical_pages(gt_df: pd.DataFrame, line_col: str) -> list[pd.Dat
     page_starts = [0]
     for i in range(1, len(line_numbers)):
         prev, curr = line_numbers.iloc[i - 1], line_numbers.iloc[i]
-        if pd.notna(curr) and curr == 1 and (pd.isna(prev) or prev != 1):
+        if pd.notna(curr) and ((pd.notna(prev) and curr < prev)
+                               or (year == 1940 and curr >= 41 and pd.notna(prev) and prev <= 40)):
             page_starts.append(i)
     page_starts.append(len(gt_df))
 
@@ -196,7 +205,8 @@ def align_by_household_order(
 
 def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
             physical_page: int,
-            schedule_type: str = "population") -> tuple[dict, list]:
+            schedule_type: str = "population",
+            ground_truth_row_range: tuple[int, int] | None = None) -> tuple[dict, list]:
     """
     Compare extracted records against ONE physical page of ground truth.
 
@@ -209,48 +219,66 @@ def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
         data = json.load(f)
     records = data["records"]
     extraction_diag = data.get("diagnostics", {})
-    schedule_type = data.get("schedule_type", schedule_type)
-    schema = get_census_schema(year, schedule_type)
+    if data.get("census_year", year) != year or data.get("schedule_type", schedule_type) != schedule_type:
+        raise ValueError("Extraction year/schedule does not match the requested ground truth.")
+    extracted_sheet = data.get("sheet_name")
+    if extracted_sheet is not None and extracted_sheet != gt_sheet:
+        raise ValueError(
+            f"Extraction sheet_name {extracted_sheet!r} does not match ground truth sheet {gt_sheet!r}."
+        )
+    schema = get_census_schema(year, schedule_type, sheet_name=gt_sheet)
 
     gt_df = load_ground_truth(gt_xlsx, gt_sheet)
     line_col = find_line_number_column(gt_df.columns)
-    if schema.has_ground_truth_line_number:
+    if ground_truth_row_range is not None:
+        start, end = ground_truth_row_range
+        if not (0 <= start < end <= len(gt_df)):
+            raise ValueError("ground_truth_row_range must be 0-based [start,end) within the selected sheet.")
+        page_df = gt_df.iloc[start:end].reset_index(drop=True)
+        page_count = None  # The confirmed range establishes this page, not all page boundaries.
+    elif schema.has_ground_truth_line_number:
         if line_col is None:
             raise ValueError(f"No 'Line Number' column found in sheet '{gt_sheet}'.")
-        pages = split_into_physical_pages(gt_df, line_col)
+        pages = split_into_physical_pages(gt_df, line_col, year=year)
+        page_count = len(pages)
+        if not (1 <= physical_page <= page_count):
+            raise ValueError(f"physical_page={physical_page} out of range (1..{page_count}).")
+        page_df = pages[physical_page - 1]
     else:
-        pages = [
-            gt_df.iloc[start:start + schema.expected_lines].reset_index(drop=True)
-            for start in range(0, len(gt_df), schema.expected_lines)
-        ]
-    page_count = (
-        len(pages) if schema.has_ground_truth_line_number
-        else math.ceil(len(gt_df) / schema.expected_lines)
-    )
-    if not (1 <= physical_page <= page_count):
-        raise ValueError(
-            f"physical_page={physical_page} out of range -- sheet '{gt_sheet}' "
-            f"contains approximately {page_count} physical pages (1..{page_count})."
-        )
-    page_df = pages[physical_page - 1]
+        raise ValueError("This workbook has no physical line numbers. Supply a confirmed "
+                         "ground_truth_row_range=(start,end); fixed-size page guesses are unsafe.")
 
     gt_records = page_df.to_dict(orient="records")
     if schema.has_ground_truth_line_number:
-        ext_by_line = {
-            int(record["Line Number"]): record
-            for record in records
-            if record.get("Line Number") is not None
-        }
-        gt_by_line = {
-            int(record[line_col]): record
-            for record in gt_records
-            if record.get(line_col) is not None
-        }
+        def unique_lines(rows, column, source):
+            indexed = {}
+            for row in rows:
+                value = row.get(column)
+                if value is None or pd.isna(value):
+                    raise ValueError(f"{source} row lacks a physical line number; resolve alignment first.")
+                number = float(value)
+                if not number.is_integer() or number < 1:
+                    raise ValueError(f"Invalid physical line number: {value}")
+                line = int(number)
+                if line in indexed:
+                    raise ValueError(f"Duplicate line {line} in {source}; cannot safely compare.")
+                indexed[line] = row
+            return indexed
+        ext_by_line = unique_lines(records, "Line Number", "extraction")
+        gt_by_line = unique_lines(gt_records, line_col, "ground truth")
     else:
         ext_by_line, gt_by_line = align_by_household_order(records, gt_records)
 
-    compare_columns = [column for column in schema.columns if column in page_df.columns]
-    priority_fields = schema.priority_fields
+    # Resolve the selected sheet's labels to the same canonical field IDs as
+    # extraction. Never treat the year-level preferred alias as the only spelling.
+    mapped_ids = {canonical_field(column) for column in schema.columns}
+    compare_columns = [column for column in page_df.columns if canonical_field(str(column)) in mapped_ids]
+    if len({canonical_field(str(c)) for c in compare_columns}) != len(compare_columns):
+        raise ValueError("Ambiguous duplicate field aliases in the selected sheet.")
+    if not compare_columns:
+        raise ValueError("No image-transcribable fields map to the selected sheet.")
+    priority_ids = {canonical_field(c) for c in schema.priority_fields}
+    priority_fields = [c for c in compare_columns if canonical_field(c) in priority_ids]
     results = []
     field_scores = {c: [] for c in compare_columns}
     priority_scores = {c: [] for c in compare_columns if c in priority_fields}
@@ -259,15 +287,25 @@ def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
         gt_row = gt_by_line.get(line_num, {})
         ext_row = ext_by_line.get(line_num, {})
 
-        row_result = {"line_number": line_num, "all_match": True, "fields": {}}
+        source_line = ext_row.get("Line Number", ext_row.get("_line_number"))
+        row_result = {"line_number": source_line if not schema.has_ground_truth_line_number else line_num,
+                      "alignment_position": line_num, "extraction_line_number": source_line,
+                      "row_present_in_extraction": bool(ext_row), "row_present_in_ground_truth": bool(gt_row),
+                      "all_match": bool(ext_row) and bool(gt_row), "fields": {}}
+        ext_fields = {}
+        for key, value in ext_row.items():
+            field_id = canonical_field(key)
+            if field_id in ext_fields:
+                raise ValueError(f"Ambiguous aliases in extraction: {key}")
+            ext_fields[field_id] = value
         n_fields = 0
         n_matched = 0
 
         for field in compare_columns:
             strategy = classify_strategy(field)
             gt_val = gt_row.get(field)
-            ext_val = ext_row.get(field)
-            matched = field_match(ext_val, gt_val, strategy)
+            ext_val = ext_fields.get(canonical_field(field))
+            matched = bool(ext_row) and bool(gt_row) and field_match(ext_val, gt_val, strategy)
 
             row_result["fields"][field] = {
                 "extracted": ext_val, "ground_truth": gt_val,
@@ -318,6 +356,8 @@ def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
         sum(priority_scored.values()) / len(priority_scored) if priority_scored else 0
     )
     metrics["fields_compared"] = compare_columns
+    metrics["unscored_workbook_columns"] = [str(c) for c in page_df.columns if c not in compare_columns and c != line_col]
+    metrics["ground_truth_row_range"] = ground_truth_row_range
 
     # Extraction coverage diagnostics (from the Gemini pipeline, if present).
     expected = extraction_diag.get("expected_lines") or []
@@ -373,11 +413,14 @@ if __name__ == "__main__":
                         choices=["population", "slave"])
     parser.add_argument("--page", type=int, required=True,
                         help="1-indexed physical page within --sheet, matching your scan")
+    parser.add_argument("--gt-row-range", type=int, nargs=2, metavar=("START", "END"),
+                        help="Confirmed 0-based data-row slice [START,END), required when no line numbers exist")
     parser.add_argument("--save", default=str(RESULTS_DIR / "comparison.json"))
     args = parser.parse_args()
 
     metrics, results = compare(args.extracted, args.ground_truth, args.sheet,
-                                args.year, args.page, args.schedule)
+                                args.year, args.page, args.schedule,
+                                tuple(args.gt_row_range) if args.gt_row_range else None)
     print_report(metrics)
 
     Path(args.save).parent.mkdir(parents=True, exist_ok=True)

@@ -4,7 +4,12 @@ import types as _t
 import pytest
 
 import extract
-from models import ExtractionBatch, Legibility, PersonRecord1950
+from models import (
+    FIELD_TO_GT_COLUMN_1950,
+    ExtractionBatch,
+    Legibility,
+    PersonRecord1950,
+)
 
 
 class _Resp:
@@ -31,26 +36,48 @@ class _Client:
         self.models = _Models(script)
 
 
+def test_call_gemini_requires_explicit_census_year():
+    with pytest.raises(ValueError, match="census year is required"):
+        extract.call_gemini(
+            _Client([]), "m", "sys", "usr", b"img", "image/jpeg",
+        )
+
+
 def test_call_gemini_parses_structured_batch():
     batch = ExtractionBatch(records=[PersonRecord1950(line_number=1, surname="Lee")])
     client = _Client([_Resp(parsed=batch)])
-    recs = extract.call_gemini(client, "m", "sys", "usr", b"img", "image/jpeg")
+    recs = extract.call_gemini(
+        client, "m", "sys", "usr", b"img", "image/jpeg", year=1950,
+    )
     assert recs[0].surname == "Lee"
     assert client.models.calls == 1
 
 
-def test_pro_model_keeps_required_thinking_when_fast_mode_disables_it(monkeypatch):
-    monkeypatch.setattr(extract, "DEFAULT_THINKING_BUDGET", 0)
-    config = extract._config("sys", "gemini-3.1-pro-preview")
-    assert config.thinking_config.thinking_budget == 1024
-    fast = extract._config("sys", "gemini-3.1-flash-lite")
-    assert fast.thinking_config.thinking_budget == 0
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_flash_config_uses_thinking_level(monkeypatch, level):
+    monkeypatch.setattr(extract, "thinking_level", lambda value=None, chosen=level: chosen)
+    config = extract._config("sys", "gemini-3.8-flash")
+    actual = config.thinking_config.thinking_level
+    assert str(getattr(actual, "value", actual)).lower() == level
+
+
+def test_thinking_level_accepts_low_medium_high():
+    assert extract.thinking_level("low") == "low"
+    assert extract.thinking_level("MEDIUM") == "medium"
+    assert extract.thinking_level("High") == "high"
+
+
+def test_invalid_thinking_level_raises():
+    with pytest.raises(ValueError, match="low, medium, or high"):
+        extract.thinking_level("minimal")
 
 
 def test_call_gemini_falls_back_to_text_json():
     payload = json.dumps({"records": [{"line_number": 2, "surname": "Ng"}]})
     client = _Client([_Resp(parsed=None, text=payload)])
-    recs = extract.call_gemini(client, "m", "sys", "usr", b"img", "image/jpeg")
+    recs = extract.call_gemini(
+        client, "m", "sys", "usr", b"img", "image/jpeg", year=1950,
+    )
     assert recs[0].line_number == 2
     assert recs[0].surname == "Ng"
 
@@ -59,7 +86,9 @@ def test_call_gemini_retries_then_succeeds(monkeypatch):
     monkeypatch.setattr(extract.time, "sleep", lambda *_: None)
     batch = ExtractionBatch(records=[PersonRecord1950(line_number=1)])
     client = _Client([RuntimeError("429"), _Resp(parsed=batch)])
-    recs = extract.call_gemini(client, "m", "sys", "usr", b"img", "image/jpeg")
+    recs = extract.call_gemini(
+        client, "m", "sys", "usr", b"img", "image/jpeg", year=1950,
+    )
     assert len(recs) == 1
     assert client.models.calls == 2
 
@@ -72,6 +101,7 @@ def test_call_gemini_reports_attempt_retry_and_success(monkeypatch):
     extract.call_gemini(
         client, "m", "sys", "usr", b"img", "image/jpeg",
         event_callback=events.append, source_label="crop_1",
+        year=1950,
     )
     assert [event["type"] for event in events] == [
         "api_attempt", "api_error", "api_attempt", "api_success",
@@ -88,6 +118,7 @@ def test_call_gemini_does_not_report_success_before_json_validation(monkeypatch)
     extract.call_gemini(
         client, "m", "sys", "usr", b"img", "image/jpeg",
         event_callback=events.append,
+        year=1950,
     )
     assert [event["type"] for event in events] == [
         "api_attempt", "api_error", "api_attempt", "api_success",
@@ -100,7 +131,9 @@ def test_call_gemini_raises_after_max_retries(monkeypatch):
     monkeypatch.setattr(extract.time, "sleep", lambda *_: None)
     client = _Client([RuntimeError("boom")] * extract.MAX_RETRIES_API)
     with pytest.raises(RuntimeError):
-        extract.call_gemini(client, "m", "sys", "usr", b"img", "image/jpeg")
+        extract.call_gemini(
+            client, "m", "sys", "usr", b"img", "image/jpeg", year=1950,
+        )
 
 
 def test_call_gemini_does_not_retry_billing_or_credential_failures(monkeypatch):
@@ -111,6 +144,7 @@ def test_call_gemini_does_not_retry_billing_or_credential_failures(monkeypatch):
         extract.call_gemini(
             client, "m", "sys", "usr", b"img", "image/jpeg",
             event_callback=events.append,
+            year=1950,
         )
     assert client.models.calls == 1
     assert events[-1]["retry_in_seconds"] is None
@@ -138,6 +172,7 @@ def test_missing_candidate_is_low_confidence_even_if_model_claims_high():
         [person], [{"Line Number": 1, "Surname": None}],
         [{"Line Number": 1, "Surname": None}],
         {"conflict_fields_by_line": {}, "line_sources": {"1": "crop_1"}}, 30,
+        field_map=FIELD_TO_GT_COLUMN_1950,
     )
     surname = next(item for item in candidates if item["field"] == "Surname")
     assert surname["model_confidence"] == "low"
@@ -155,7 +190,7 @@ def _full_batch(records):
 
 
 def test_extract_from_image_skips_crops_when_full_page_complete(monkeypatch):
-    monkeypatch.setattr(extract, "load_prompt", lambda year: ("sys", "usr"))
+    monkeypatch.setattr(extract, "load_prompt", lambda *args, **kwargs: ("sys", "usr"))
     monkeypatch.setattr(extract, "prepare_full_page", lambda path: (b"img", "image/jpeg"))
 
     def _boom(*a, **kw):
@@ -177,7 +212,7 @@ def test_extract_from_image_skips_crops_when_full_page_complete(monkeypatch):
 
 
 def test_row_block_strategy_skips_slow_full_page_response(monkeypatch):
-    monkeypatch.setattr(extract, "load_prompt", lambda year: ("sys", "usr"))
+    monkeypatch.setattr(extract, "load_prompt", lambda *args, **kwargs: ("sys", "usr"))
     monkeypatch.setattr(
         extract, "prepare_full_page",
         lambda path: (_ for _ in ()).throw(AssertionError("full page should not run")),
@@ -202,7 +237,7 @@ def test_row_block_strategy_skips_slow_full_page_response(monkeypatch):
 
 
 def test_extract_from_image_targets_only_flagged_band(monkeypatch):
-    monkeypatch.setattr(extract, "load_prompt", lambda year: ("sys", "usr"))
+    monkeypatch.setattr(extract, "load_prompt", lambda *args, **kwargs: ("sys", "usr"))
     monkeypatch.setattr(extract, "prepare_full_page", lambda path: (b"img", "image/jpeg"))
 
     captured = {}
@@ -232,7 +267,7 @@ def test_extract_from_image_targets_only_flagged_band(monkeypatch):
 
 
 def test_extract_from_image_caps_clusters_at_n_blocks(monkeypatch):
-    monkeypatch.setattr(extract, "load_prompt", lambda year: ("sys", "usr"))
+    monkeypatch.setattr(extract, "load_prompt", lambda *args, **kwargs: ("sys", "usr"))
     monkeypatch.setattr(extract, "prepare_full_page", lambda path: (b"img", "image/jpeg"))
 
     calls = []
@@ -277,6 +312,7 @@ def test_review_sidecar_preserves_raw_value_confidence_and_conflict():
         [{"Line Number": 1, "Surname": "Wite", "Race": "White"}],
         {"line_sources": {"1": "crop_1"}, "conflict_fields_by_line": {"1": ["surname"]}},
         expected_lines=30,
+        field_map=FIELD_TO_GT_COLUMN_1950,
     )
     surname = next(item for item in candidates if item["field"] == "Surname")
     race = next(item for item in candidates if item["field"] == "Race")

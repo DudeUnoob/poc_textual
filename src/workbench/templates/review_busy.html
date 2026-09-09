@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Row in use · Workbench{% endblock %}
+{% block content %}
+<a class="back" href="/batches/{{ batch.id }}">← {{ batch.name }}</a>
+<section class="card">
+  <span class="eyebrow">Edit reservation</span>
+  <h1>This row is open in another browser.</h1>
+  <p>{{ message }}</p>
+  <p class="muted">Choose another row now, or retry after the two-minute reservation expires.</p>
+  <a class="button" href="/review/rows/next?batch_id={{ batch.id }}">Choose another row</a>
+</section>
+{% endblock %}

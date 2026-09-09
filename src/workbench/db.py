@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Generator
 
 from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Integer, JSON,
@@ -8,6 +8,11 @@ from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Integer, JSON,
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from .config import DATABASE_URL, ensure_directories
+
+
+def utc_now() -> datetime:
+    """UTC stored as a naive value for SQLite compatibility."""
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class Base(DeclarativeBase):
@@ -27,7 +32,7 @@ class Batch(Base):
     ground_truth_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     ground_truth_sheet: Mapped[str | None] = mapped_column(String(200), nullable=True)
     ground_truth_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     pages: Mapped[list["Page"]] = relationship(back_populates="batch", cascade="all, delete-orphan")
 
 
@@ -42,7 +47,7 @@ class Page(Base):
     kind: Mapped[str] = mapped_column(String(20), default="census")
     metadata_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     import_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     batch: Mapped[Batch] = relationship(back_populates="pages")
     candidates: Mapped[list["FieldCandidate"]] = relationship(back_populates="page", cascade="all, delete-orphan")
 
@@ -56,7 +61,7 @@ class ExtractionRun(Base):
     prompt_version: Mapped[str] = mapped_column(String(80), default="schema-v1")
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -81,7 +86,7 @@ class FieldCandidate(Base):
     status: Mapped[str] = mapped_column(String(24), default="review_required", index=True)
     auto_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
     qc_sampled: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     page: Mapped[Page] = relationship(back_populates="candidates")
     decisions: Mapped[list["ReviewDecision"]] = relationship(back_populates="candidate", cascade="all, delete-orphan")
 
@@ -95,7 +100,7 @@ class ReviewDecision(Base):
     previous_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     value: Mapped[str | None] = mapped_column(Text, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     candidate: Mapped[FieldCandidate] = relationship(back_populates="decisions")
 
 
@@ -105,10 +110,12 @@ class CalibrationBand(Base):
     census_year: Mapped[int] = mapped_column(Integer, index=True)
     schedule_type: Mapped[str] = mapped_column(String(20), default="population")
     field_name: Mapped[str] = mapped_column(String(120), index=True)
+    model: Mapped[str] = mapped_column(String(200), default="", index=True)
+    prompt_version: Mapped[str] = mapped_column(String(80), default="schema-v1")
     confidence: Mapped[str] = mapped_column(String(12))
     total: Mapped[int] = mapped_column(Integer, default=0)
     correct: Mapped[int] = mapped_column(Integer, default=0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     @property
     def precision(self) -> float:
@@ -122,7 +129,7 @@ class Export(Base):
     version: Mapped[int] = mapped_column(Integer)
     directory: Mapped[str] = mapped_column(Text)
     summary: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
 ensure_directories()
@@ -140,6 +147,8 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def init_db() -> None:
+    from .leases import ReviewLease  # noqa: F401
+
     ensure_directories()
     Base.metadata.create_all(bind=engine)
     columns = {column["name"] for column in inspect(engine).get_columns("batches")}
@@ -158,6 +167,18 @@ def init_db() -> None:
             connection.execute(text(
                 "ALTER TABLE calibration_bands ADD COLUMN schedule_type "
                 "VARCHAR(20) NOT NULL DEFAULT 'population'"
+            ))
+    if "model" not in calibration_columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE calibration_bands ADD COLUMN model "
+                "VARCHAR(200) NOT NULL DEFAULT ''"
+            ))
+    if "prompt_version" not in calibration_columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE calibration_bands ADD COLUMN prompt_version "
+                "VARCHAR(80) NOT NULL DEFAULT 'schema-v1'"
             ))
 
 

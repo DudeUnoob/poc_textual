@@ -6,7 +6,13 @@ services:
       - "8000:8000"
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      GEMINI_THINKING_LEVEL: ${GEMINI_THINKING_LEVEL:-medium}
+      GEMINI_MAX_OUTPUT_TOKENS: ${GEMINI_MAX_OUTPUT_TOKENS:-16384}
       WORKBENCH_DATA_DIR: /app/data/workbench
+      WORKBENCH_BACKEND: ${WORKBENCH_BACKEND:-local}
+      WORKBENCH_EXTRACTION_ENABLED: ${WORKBENCH_EXTRACTION_ENABLED:-false}
+      WORKBENCH_ALLOWED_DOMAINS: ${WORKBENCH_ALLOWED_DOMAINS:-utexas.edu}
     volumes:
       - ./data/workbench:/app/data/workbench
   worker:
@@ -14,6 +20,11 @@ services:
     command: python -m workbench.worker
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      GEMINI_THINKING_LEVEL: ${GEMINI_THINKING_LEVEL:-medium}
+      GEMINI_MAX_OUTPUT_TOKENS: ${GEMINI_MAX_OUTPUT_TOKENS:-16384}
       WORKBENCH_DATA_DIR: /app/data/workbench
+      WORKBENCH_BACKEND: ${WORKBENCH_BACKEND:-local}
+      WORKBENCH_EXTRACTION_ENABLED: ${WORKBENCH_EXTRACTION_ENABLED:-false}
     volumes:
       - ./data/workbench:/app/data/workbench

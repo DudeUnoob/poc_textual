@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ batch.name }} · Shared portal{% endblock %}
+{% block content %}
+<a class="back" href="/shared">← Shared batches</a>
+<div class="split-heading">
+  <div>
+    <span class="eyebrow">{{ batch.year }} {{ batch.schedule_type }} · {{ batch.district }}</span>
+    <h1>{{ batch.name }}</h1>
+    <p>{{ batch.sheet_name }} · {{ batch.status }}</p>
+  </div>
+  <a class="button" href="/shared/batches/{{ batch.id }}/review">Review next row</a>
+</div>
+<section class="card">
+  <h2>Authorized Ancestry scans</h2>
+  <form method="post" action="/shared/batches/{{ batch.id }}/pages" enctype="multipart/form-data" class="form-grid">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <input type="hidden" name="operation_id" value="{{ upload_operation_id }}">
+    <label>Ancestry image/source ID<input name="image_id" required></label>
+    <label>Image<input type="file" name="image" accept="image/jpeg,image/png,image/tiff" required></label>
+    <button>Upload immutable scan</button>
+  </form>
+  <ul>{% for page in pages %}<li>{{ page.source.image_id }} · {{ page.storage_status }} · {{ page.checksum[:12] }}</li>{% else %}<li>No scans uploaded.</li>{% endfor %}</ul>
+</section>
+<section class="card">
+  <h2>Extraction</h2>
+  <form method="post" action="/shared/batches/{{ batch.id }}/jobs">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <input type="hidden" name="job_id" value="{{ job_id }}">
+    <input type="hidden" name="operation_id" value="{{ job_operation_id }}">
+    <button {% if not pages %}disabled{% endif %}>Queue Gemini 3.8 extraction</button>
+  </form>
+  <ul>{% for job in jobs %}<li>{{ job.id }} · {{ job.status }} · {{ job.completed_pages|length }}/{{ job.page_ids|length }} pages</li>{% else %}<li>No extraction jobs.</li>{% endfor %}</ul>
+</section>
+{% if batch.release_id %}
+<a class="button" href="/api/shared/releases/{{ batch.release_id }}/export">Download final release</a>
+{% endif %}
+{% endblock %}

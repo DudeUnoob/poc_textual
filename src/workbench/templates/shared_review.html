@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Review row {{ row.row_key }} · Shared portal{% endblock %}
+{% block content %}
+{% from "image_viewer.html" import viewer %}
+<a class="back" href="/shared/batches/{{ batch.id }}">← {{ batch.name }}</a>
+<div class="review-head">
+  <div>
+    <span class="eyebrow">Row {{ row.row_key }}</span>
+    <h1>{{ 'Independent QA check' if is_qa else 'Primary human review' }}</h1>
+    <p>Reviewing as {{ current_user.email }}</p>
+  </div>
+</div>
+<section class="review-layout">
+  <div class="evidence">
+    {{ viewer('/api/shared/pages/' ~ page.id ~ '/media', 'Full census page, row ' ~ row.row_key) }}
+  </div>
+  <form method="post" action="/shared/batches/{{ batch.id }}/rows/{{ row.id }}" class="decision card" data-review-form>
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <input type="hidden" name="operation_id" value="{{ operation_id }}">
+    <input type="hidden" name="lease_token" value="{{ lease.token }}">
+    <input type="hidden" name="review_session" value="{{ lease.session_id }}">
+    <input type="hidden" name="expected_revision" value="{{ lease.revision }}">
+    {% if is_qa %}
+      <input type="hidden" name="qa" value="1">
+      <p>Compare the complete reviewed row against the scan. Your check is independent from {{ row.reviewed_by }}.</p>
+    {% else %}
+      {% for field, value in row.values.items() %}
+      <label>{{ field }}
+        <input name="value:{{ field }}" value="{{ value if value is not none else '' }}" autocomplete="off">
+        <select name="state:{{ field }}">
+          {% set current_state = row.reading_states.get(field, 'blank' if value is none else 'value') %}
+          {% for state in ['value', 'blank', 'unreadable', 'not_applicable', 'unresolved'] %}
+          <option value="{{ state }}" {% if state == current_state %}selected{% endif %}>{{ state|replace('_', ' ') }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% endfor %}
+      <button name="action" value="draft" class="secondary">Save private draft</button>
+    {% endif %}
+    <button name="action" value="submit">{{ 'Complete independent check' if is_qa else 'Submit reviewed row' }}</button>
+  </form>
+</section>
+<script src="/static/image-viewer.js" defer></script>
+<link rel="stylesheet" href="/static/image-viewer.css">
+{% endblock %}

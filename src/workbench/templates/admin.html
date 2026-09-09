@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Members · Workbench{% endblock %}
+{% block content %}
+<a class="back" href="/">← All batches</a>
+<div class="split-heading">
+  <div>
+    <span class="eyebrow">Administration</span>
+    <h1>Workbench members</h1>
+    <p class="muted">Roles and access are assigned here. Accounts self-register with a verified university email; this page never accepts a role from the browser Auth SDK.</p>
+  </div>
+</div>
+{% if notice %}<p class="action-required">{{ notice }}</p>{% endif %}
+<section class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>Email</th>
+        <th>Role</th>
+        <th>Disabled</th>
+        <th>Assignments</th>
+        <th>Progress</th>
+        <th>Update</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for member in members|default([]) %}
+      <tr>
+        <td>{{ member.email }}</td>
+        <td>{{ member.role }}</td>
+        <td>{% if member.disabled %}<span class="error">Disabled</span>{% else %}<span class="ok">Active</span>{% endif %}</td>
+        <td>{{ member.assignments|default([])|join(', ') or 'All unassigned work' }}</td>
+        <td>{{ member.progress|default('—') }}</td>
+        <td>
+          <form method="post" action="/admin/members/{{ member.uid }}" class="inline">
+            {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+            <input type="hidden" name="operation_id" value="{{ operation_ids[member.uid] }}">
+            <select name="role" aria-label="Role for {{ member.email }}">
+              <option value="member" {% if member.role == 'member' %}selected{% endif %}>member</option>
+              <option value="admin" {% if member.role == 'admin' %}selected{% endif %}>admin</option>
+            </select>
+            <label class="inline"><input type="checkbox" name="disabled" value="1" {% if member.disabled %}checked{% endif %}> Disabled</label>
+            <input name="assignments" value="{{ member.assignments|default([])|join(',') }}" placeholder="Optional batch IDs" aria-label="Assignments for {{ member.email }}">
+            <button type="submit">Save</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6">No members yet. A verified university email can register from the sign-in page; bootstrap the first administrator with the operator CLI.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

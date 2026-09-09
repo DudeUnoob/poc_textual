@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime
 
 from sqlalchemy import select
 
 from compare import compare
 
-from .db import CalibrationBand, SessionLocal, init_db
+from .db import CalibrationBand, SessionLocal, init_db, utc_now
 
 
 def record_calibration(
@@ -53,16 +52,20 @@ def record_calibration(
                 CalibrationBand.schedule_type == schedule_type,
                 CalibrationBand.field_name == field,
                 CalibrationBand.confidence == confidence,
+                CalibrationBand.model == payload.get("model", ""),
+                CalibrationBand.prompt_version == payload.get("prompt_version", "schema-v1"),
             ))
             if band is None:
                 band = CalibrationBand(
                     census_year=year, schedule_type=schedule_type,
                     field_name=field, confidence=confidence,
+                    model=payload.get("model", ""),
+                    prompt_version=payload.get("prompt_version", "schema-v1"),
                 )
                 session.add(band)
             band.total = (band.total or 0) + len(matches)
             band.correct = (band.correct or 0) + sum(matches)
-            band.updated_at = datetime.utcnow()
+            band.updated_at = utc_now()
         session.commit()
     return {"metrics": metrics, "bands": {f"{field}:{confidence}": {"total": len(values), "correct": sum(values)} for (field, confidence), values in observed.items()}}
 

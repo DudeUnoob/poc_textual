@@ -1,0 +1,17 @@
+{% macro viewer(src, label, compact=false) %}
+<div class="scan-viewer{% if compact %} scan-viewer-compact{% endif %}" data-scan-viewer>
+  <div class="scan-tools" role="toolbar" aria-label="{{ label }} image controls">
+    <button type="button" data-viewer-action="out" aria-label="Zoom out">−</button>
+    <output aria-live="polite">100%</output>
+    <button type="button" data-viewer-action="in" aria-label="Zoom in">+</button>
+    <button type="button" data-viewer-action="fit">Fit</button>
+    <button type="button" data-viewer-action="reset">Actual size</button>
+    <button type="button" data-viewer-action="fullscreen">Fullscreen</button>
+    <a href="{{ src }}" target="_blank" rel="noopener">Open image</a>
+  </div>
+  <div class="scan-viewport" tabindex="0" role="region" aria-label="{{ label }}. Use plus and minus to zoom, arrows to pan, zero to fit, and F for fullscreen.">
+    <img src="{{ src }}" alt="{{ label }}" draggable="false">
+  </div>
+  <p class="scan-help">Drag to pan · + / − to zoom · 0 to fit · F for fullscreen</p>
+</div>
+{% endmacro %}

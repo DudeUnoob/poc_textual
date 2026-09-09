@@ -6,9 +6,41 @@
   <link rel="stylesheet" href="/static/app.css">
   <link rel="stylesheet" href="/static/progress.css">
   <link rel="stylesheet" href="/static/review-row.css">
+  {% if csrf_token %}<meta name="csrf-token" content="{{ csrf_token }}">{% endif %}
+  <style>header .account{margin-left:auto;display:flex;align-items:center;gap:12px}header .account form{margin:0}header .account button,header .account .button{min-height:32px;padding:6px 10px}</style>
 </head>
 <body>
-  <header><a class="brand" href="/">Census Review Workbench</a><span>1850–1950 · local review ledger</span></header>
+  <header>
+    <a class="brand" href="/">Census Review Workbench</a>
+    <span>1850–1950 · {{ 'shared review portal' if firebase_auth else 'local review ledger' }}</span>
+    <span class="account">
+      {% if current_user %}
+        <span>{{ current_user.email }}</span>
+        <form method="post" action="/logout">
+          {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+          <button type="submit" class="ghost">Sign out</button>
+        </form>
+      {% elif firebase_auth %}
+        <a class="button" href="/login">Sign in</a>
+      {% endif %}
+    </span>
+  </header>
   <main>{% block content %}{% endblock %}</main>
+  {% if csrf_token %}
+  <script>
+    document.addEventListener("submit", (event) => {
+      const form = event.target;
+      if (!(form instanceof HTMLFormElement) || (form.method || "get").toLowerCase() !== "post") return;
+      if (form.querySelector("input[name='csrf_token']")) return;
+      const token = document.querySelector("meta[name='csrf-token']")?.getAttribute("content");
+      if (!token) return;
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "csrf_token";
+      input.value = token;
+      form.appendChild(input);
+    });
+  </script>
+  {% endif %}
 </body>
 </html>

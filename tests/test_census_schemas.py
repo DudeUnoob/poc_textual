@@ -1,4 +1,9 @@
-from census_schemas import SUPPORTED_FORMS, SUPPORTED_YEARS, get_census_schema
+from census_schemas import (
+    FIELD_BOUNDS_1950,
+    SUPPORTED_FORMS,
+    SUPPORTED_YEARS,
+    get_census_schema,
+)
 from models import get_year_models, to_year_gt_record
 
 
@@ -19,7 +24,10 @@ def test_all_project_decades_have_population_schemas():
     assert (1850, "slave") in SUPPORTED_FORMS
     assert (1860, "slave") in SUPPORTED_FORMS
     assert not get_census_schema(1850, "slave").has_ground_truth_line_number
-    assert "Birth Date" in get_census_schema(1860, "slave").columns
+    slave = get_census_schema(1860, "slave")
+    assert "Birth Date" not in slave.columns
+    assert "Name" not in slave.columns
+    assert "Slave Owner Name" in slave.columns
 
 
 def test_each_form_builds_a_fixed_gemini_schema():
@@ -32,6 +40,25 @@ def test_1920_uses_sex_and_1950_uses_birth_place():
     assert "Sex" in get_census_schema(1920).columns
     assert "Gender" not in get_census_schema(1920).columns
     assert "Birth Place" in get_census_schema(1950).columns
+
+
+def test_1950_population_keeps_validated_geometry():
+    for sheet_name in (None, "Bastrop 11-2A"):
+        schema = get_census_schema(1950, "population", sheet_name)
+        assert schema.geometry_validated is True
+        assert schema.data_top == 0.32
+        assert schema.data_bottom == 0.645
+        assert schema.row_bounds == (0.245, 0.775)
+        assert schema.field_bounds == FIELD_BOUNDS_1950
+
+
+def test_other_years_stay_full_page_without_bounds():
+    schema = get_census_schema(1860)
+    assert schema.geometry_validated is False
+    assert schema.data_top == 0.0
+    assert schema.data_bottom == 1.0
+    assert schema.field_bounds == {}
+    assert schema.row_bounds == (0.0, 1.0)
 
 
 def test_1860_keeps_internal_line_number_out_of_ground_truth_output():

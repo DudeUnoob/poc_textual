@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Shared census portal{% endblock %}
+{% block content %}
+<section class="hero">
+  <span class="eyebrow">Shared Firestore workspace</span>
+  <h1>Bastrop census review, 1850–1950.</h1>
+  <p>Each batch freezes its cleaned workbook sheet and uses authorized Ancestry images as evidence.</p>
+</section>
+{% if batches %}
+<section class="cards batch-grid">
+  {% for batch in batches %}
+  <a class="card batch-card" href="/shared/batches/{{ batch.id }}">
+    <strong>{{ batch.name }}</strong>
+    <span>{{ batch.year }} {{ batch.schedule_type }} · {{ batch.district }}</span>
+    <span>{{ batch.status }}</span>
+  </a>
+  {% endfor %}
+</section>
+{% endif %}
+<details class="card import-panel" open>
+  <summary><strong>Create a workbook-backed batch</strong></summary>
+  <form method="post" action="/shared/batches" class="form-grid">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <input type="hidden" name="batch_id" value="{{ batch_id }}">
+    <input type="hidden" name="operation_id" value="{{ operation_id }}">
+    <label>Batch name<input name="name" required></label>
+    <label>Census year<select name="year" required>{% for year in supported_years %}<option>{{ year }}</option>{% endfor %}</select></label>
+    <label>Schedule<select name="schedule_type"><option value="population">Population</option><option value="slave">Slave</option></select></label>
+    <label>Enumeration district<input name="district" required></label>
+    <label>Validated worksheet<input name="sheet_name" list="shared-workbook-sheets" required><datalist id="shared-workbook-sheets"></datalist></label>
+    <button>Create batch</button>
+  </form>
+</details>
+<script>
+(() => {
+  const form = document.querySelector('form[action="/shared/batches"]');
+  const year = form.elements.namedItem("year");
+  const schedule = form.elements.namedItem("schedule_type");
+  const list = document.getElementById("shared-workbook-sheets");
+  const refresh = async () => {
+    const response = await fetch(`/api/workbook-sheets?year=${year.value}&schedule_type=${schedule.value}`);
+    const payload = await response.json();
+    list.replaceChildren(...payload.sheets.map(value => Object.assign(document.createElement("option"), {value})));
+  };
+  year.addEventListener("change", refresh);
+  schedule.addEventListener("change", refresh);
+  refresh();
+})();
+</script>
+{% endblock %}

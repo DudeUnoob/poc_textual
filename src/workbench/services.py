@@ -4,21 +4,21 @@ import csv
 import hashlib
 import json
 import re
-import shutil
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import case, func, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, aliased
 
 from validate import validate_records
 
 from .config import (EXPORTS_DIR, MIN_CALIBRATION_SAMPLES, PRECISION_TARGET,
                      RUNS_DIR, SAMPLE_RATE, STORAGE_DIR)
+from .budgets import max_upload_bytes
+from .budgets import max_upload_bytes
 from .db import (Batch, CalibrationBand, Export, ExtractionRun, FieldCandidate,
-                 Page, ReviewDecision)
+                 Page, ReviewDecision, utc_now)
 from .schema import get_schema
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -42,6 +42,23 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def copy_upload_bounded(source, destination: Path) -> None:
+    limit = max_upload_bytes()
+    written = 0
+    try:
+        with destination.open("wb") as target:
+            while chunk := source.read(1024 * 1024):
+                written += len(chunk)
+                if written > limit:
+                    raise ValueError(
+                        f"Upload exceeds WORKBENCH_MAX_UPLOAD_BYTES={limit}."
+                    )
+                target.write(chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+
+
 def import_files(session: Session, batch: Batch, uploads: list) -> list[Page]:
     """Copy uploads into immutable local storage and create confirmable pages."""
     stored_pages: list[Page] = []
@@ -56,9 +73,32 @@ def import_files(session: Session, batch: Batch, uploads: list) -> list[Page]:
             session.add(page)
             stored_pages.append(page)
             continue
+        upload.file.seek(0, 2)
+        size = upload.file.tell()
+        upload.file.seek(0)
+        limit = max_upload_bytes()
+        if size > limit:
+            page = Page(
+                batch_id=batch.id, original_filename=filename, stored_path="", sha256="",
+                import_error=f"File exceeds WORKBENCH_MAX_UPLOAD_BYTES={limit}",
+            )
+            session.add(page)
+            stored_pages.append(page)
+            continue
         destination = batch_dir / f"{sequence:04d}_{filename}"
-        with destination.open("wb") as fh:
-            shutil.copyfileobj(upload.file, fh)
+        try:
+            copy_upload_bounded(upload.file, destination)
+        except ValueError as exc:
+            page = Page(
+                batch_id=batch.id,
+                original_filename=filename,
+                stored_path="",
+                sha256="",
+                import_error=str(exc),
+            )
+            session.add(page)
+            stored_pages.append(page)
+            continue
         digest = sha256_file(destination)
         hint, kind = parse_image_hint(filename)
         if digest in seen_hashes:
@@ -122,12 +162,16 @@ def calibration_allows(
     schedule_type: str,
     field: str,
     confidence: str,
+    model: str = "",
+    prompt_version: str = "schema-v1",
 ) -> bool:
     band = session.scalar(select(CalibrationBand).where(
         CalibrationBand.census_year == year,
         CalibrationBand.schedule_type == schedule_type,
         CalibrationBand.field_name == field,
         CalibrationBand.confidence == confidence,
+        CalibrationBand.model == (model or ""),
+        CalibrationBand.prompt_version == prompt_version,
     ))
     return bool(band and band.total >= MIN_CALIBRATION_SAMPLES and band.precision >= PRECISION_TARGET)
 
@@ -153,13 +197,16 @@ def persist_extraction(session: Session, run: ExtractionRun, page: Page, payload
         validation_warnings = warnings_by_line.get(line, [])
         warnings = reasons + validation_warnings
         can_auto_accept = (
+            False  # Pilot requires complete human review; calibration alone is insufficient.
+            and
             item.get("model_confidence") == "high"
             and item.get("row_legibility") == "clear"
             and not item.get("conflict")
             and not warnings
             and item.get("normalized_value") not in (None, "")
             and calibration_allows(
-                session, year, page.batch.schedule_type, item["field"], "high"
+                session, year, page.batch.schedule_type, item["field"], "high",
+                model=run.model, prompt_version=run.prompt_version,
             )
         )
         sampled = can_auto_accept and deterministic_sample(page.id, line, item["field"])
@@ -183,10 +230,12 @@ def _text_or_none(value) -> str | None:
 
 def latest_candidate_run_id_query(batch_id: int):
     """Return the newest extraction run that actually produced review data."""
-    return (select(func.max(FieldCandidate.run_id))
-        .join(Page, Page.id == FieldCandidate.page_id)
-        .where(Page.batch_id == batch_id)
-        .scalar_subquery())
+    other = aliased(FieldCandidate)
+    reviewed = (select(func.min(other.run_id)).join(ReviewDecision, ReviewDecision.candidate_id == other.id)
+                .where(other.page_id == FieldCandidate.page_id).correlate(FieldCandidate).scalar_subquery())
+    newest = (select(func.max(other.run_id)).where(other.page_id == FieldCandidate.page_id)
+              .correlate(FieldCandidate).scalar_subquery())
+    return func.coalesce(reviewed, newest)
 
 
 def queue_query(batch_id: int, exclude_candidate_id: int | None = None,
@@ -242,6 +291,7 @@ def reclassify_run_candidates(session: Session, run_id: int,
     precision band are never auto-accepted by that same band.
     """
     excluded = exclude_page_ids or set()
+    run = session.get(ExtractionRun, run_id)
     candidates = session.scalars(
         select(FieldCandidate)
         .where(
@@ -254,6 +304,8 @@ def reclassify_run_candidates(session: Session, run_id: int,
     for candidate in candidates:
         warnings = [*candidate.reasons, *candidate.validation_warnings]
         can_auto_accept = (
+            False  # Pilot requires complete human review; calibration alone is insufficient.
+            and
             candidate.page_id not in excluded
             and candidate.model_confidence == "high"
             and candidate.row_legibility == "clear"
@@ -264,6 +316,8 @@ def reclassify_run_candidates(session: Session, run_id: int,
                 session, candidate.page.batch.census_year,
                 candidate.page.batch.schedule_type,
                 candidate.field_name, "high",
+                model=run.model if run else "",
+                prompt_version=run.prompt_version if run else "schema-v1",
             )
         )
         sampled = can_auto_accept and deterministic_sample(
@@ -289,10 +343,11 @@ def apply_decision(session: Session, candidate: FieldCandidate, reviewer: str, a
         raise ValueError("Invalid review action.")
     if action == "corrected" and value is None:
         raise ValueError("A corrected value is required.")
-    final_value = None if action == "unreadable" else (value.strip() if action == "corrected" else candidate.normalized_value)
+    previous = current_value(candidate)
+    final_value = None if action == "unreadable" else (value.strip() if action == "corrected" else previous)
     decision = ReviewDecision(
-        candidate_id=candidate.id, reviewer=reviewer.strip(), action=action,
-        previous_value=candidate.normalized_value, value=final_value,
+        candidate=candidate, reviewer=reviewer.strip(), action=action,
+        previous_value=previous, value=final_value,
         rationale=(rationale or "").strip() or None,
     )
     candidate.status = action
@@ -301,17 +356,30 @@ def apply_decision(session: Session, candidate: FieldCandidate, reviewer: str, a
     return decision
 
 
+def current_value(candidate: FieldCandidate) -> str | None:
+    """A later confirmation/deferral must not undo a human correction."""
+    decisions = sorted(candidate.decisions, key=lambda d: (d.created_at, d.id or 0))
+    for decision in reversed(decisions):
+        if decision.action in FINAL_STATUSES:
+            return decision.value
+    return candidate.normalized_value
+
+
 def canonical_value(candidate: FieldCandidate) -> str | None:
-    decisions = sorted(candidate.decisions, key=lambda d: d.created_at)
-    if decisions and decisions[-1].action in FINAL_STATUSES:
-        return decisions[-1].value
+    decisions = sorted(candidate.decisions, key=lambda d: (d.created_at, d.id or 0))
+    for decision in reversed(decisions):
+        if decision.action in FINAL_STATUSES:
+            return decision.value
     if candidate.status == "auto_accepted":
         return candidate.normalized_value
     return None
 
 
 def create_export(session: Session, batch: Batch) -> Export:
-    schema = get_schema(batch.census_year, batch.schedule_type)
+    try:
+        schema = get_schema(batch.census_year, batch.schedule_type, batch.ground_truth_sheet)
+    except TypeError:
+        schema = get_schema(batch.census_year, batch.schedule_type)
     version = (session.scalar(select(Export.version).where(Export.batch_id == batch.id).order_by(Export.version.desc())) or 0) + 1
     target = EXPORTS_DIR / f"batch_{batch.id}" / f"v{version:03d}"
     target.mkdir(parents=True, exist_ok=False)
@@ -324,7 +392,9 @@ def create_export(session: Session, batch: Batch) -> Export:
         if page.kind != "census":
             continue
         by_line: dict[int, dict] = defaultdict(dict)
-        current_candidates = (candidate for candidate in page.candidates if candidate.run_id == latest_run_id)
+        reviewed_runs = [c.run_id for c in page.candidates if c.decisions]
+        page_run_id = min(reviewed_runs) if reviewed_runs else max((c.run_id for c in page.candidates), default=None)
+        current_candidates = (candidate for candidate in page.candidates if candidate.run_id == page_run_id)
         for candidate in sorted(current_candidates, key=lambda c: (c.line_number, c.field_name)):
             value = canonical_value(candidate)
             if candidate.status not in FINAL_STATUSES and candidate.status != "auto_accepted":
@@ -349,7 +419,7 @@ def create_export(session: Session, batch: Batch) -> Export:
     pd.DataFrame(rows).to_csv(target / "reviewed_records.csv", index=False)
     pd.DataFrame(rows).to_excel(target / "reviewed_records.xlsx", index=False)
     (target / "reviewed_records.json").write_text(json.dumps(rows, indent=2, default=str))
-    summary = {"batch_id": batch.id, "extraction_run_id": latest_run_id, "version": version, "created_at": datetime.utcnow().isoformat(), "rows": len(rows), "unresolved_fields": unresolved, "schema_year": batch.census_year}
+    summary = {"batch_id": batch.id, "extraction_run_id": latest_run_id, "version": version, "created_at": utc_now().isoformat() + "Z", "rows": len(rows), "unresolved_fields": unresolved, "schema_year": batch.census_year}
     (target / "audit.json").write_text(json.dumps({"summary": summary, "fields": audit}, indent=2, default=str))
     export = Export(batch_id=batch.id, version=version, directory=str(target), summary=summary)
     session.add(export)

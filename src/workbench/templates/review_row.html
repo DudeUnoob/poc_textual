@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Review line {{ line_number }} · Workbench{% endblock %}
 {% block content %}
+{% from "image_viewer.html" import viewer %}
 <a class="back" href="/batches/{{ batch.id }}">← {{ batch.name }}</a>
 <div class="review-head">
   <div>
@@ -12,14 +13,29 @@
 </div>
 
 <form class="row-review-form" method="post" action="/review/rows/{{ candidates[0].run_id }}/{{ page.id }}/{{ line_number }}" data-review-form data-row-review>
+  {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+  {% if lease %}
+  <input type="hidden" name="lease_token" value="{{ lease.token }}">
+  <input type="hidden" name="review_session" value="{{ lease.session_id }}">
+  <input type="hidden" name="expected_revision" value="{{ lease.revision }}">
+  <span data-lease-renew-url="/review/leases/{{ candidates[0].run_id }}/{{ page.id }}/{{ line_number }}/renew" hidden></span>
+  {% endif %}
   <div class="row-review-sticky">
     <section class="row-review-evidence">
       <div class="evidence-heading"><div><span class="eyebrow">Handwriting evidence</span><h2>Complete census row</h2></div><span>Line {{ line_number }}</span></div>
-      <div class="row-frame"><img class="row-crop row-crop-large" src="/pages/{{ page.id }}/crop?line={{ line_number }}" alt="Complete census row {{ line_number }}"></div>
-      <details><summary>Open full page for more context</summary><img class="full-page" src="/pages/{{ page.id }}/image" alt="Full census page"></details>
+      {% if geometry_validated %}
+      {{ viewer('/pages/' ~ page.id ~ '/crop?line=' ~ line_number, 'Complete census row ' ~ line_number, true) }}
+      <details><summary>Full page context</summary>{{ viewer('/pages/' ~ page.id ~ '/image', 'Full census page') }}</details>
+      {% else %}
+      {{ viewer('/pages/' ~ page.id ~ '/image', 'Full census page, line ' ~ line_number) }}
+      {% endif %}
     </section>
     <div class="row-review-toolbar card">
+      {% if current_user %}
+      <p class="muted">Reviewing as <strong>{{ current_user.email }}</strong></p>
+      {% else %}
       <label>Reviewer name / initials<input name="reviewer" required autocomplete="name" data-reviewer></label>
+      {% endif %}
       <label class="row-rationale">Decision note (optional)<input name="rationale" placeholder="One note applies to this row"></label>
       <button type="submit" data-save-row title="Keyboard shortcut: Command/Control + Enter">Save row &amp; next</button>
     </div>
@@ -48,4 +64,6 @@
 
 <details class="card line-context"><summary>All AI readings for this row</summary><div class="context-grid">{% for field in all_fields %}<div class="context-field"><span>{{ field.field_name }}</span><strong>{{ field.normalized_value if field.normalized_value is not none else '—' }}</strong></div>{% endfor %}</div></details>
 <script src="/static/review.js" defer></script>
+<script src="/static/image-viewer.js" defer></script>
+<link rel="stylesheet" href="/static/image-viewer.css">
 {% endblock %}

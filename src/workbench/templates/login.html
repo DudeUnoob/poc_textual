@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Workbench{% endblock %}
+{% block content %}
+<section class="hero">
+  <span class="eyebrow">University access</span>
+  <h1>Sign in to the census review workbench.</h1>
+  <p>Use a verified email at an allowed university domain. Firebase handles passwords, verification, and reset. The server never receives your password.</p>
+</section>
+<script type="application/json" id="firebase-config">
+{
+  "apiKey": "{{ firebase_api_key }}",
+  "authDomain": "{{ firebase_auth_domain }}",
+  "projectId": "{{ firebase_project_id }}",
+  "appId": "{{ firebase_app_id }}",
+  "csrfToken": "{{ csrf_token }}",
+  "allowedDomains": "{{ allowed_domains|join(',') if allowed_domains is defined else 'utexas.edu' }}"
+}
+</script>
+<section class="card" id="auth-panel">
+  <p class="error" id="auth-error" hidden role="alert"></p>
+  <p class="ok" id="auth-notice" hidden></p>
+  <form id="auth-form" class="form-grid" data-mode="signin">
+    <label>University email<input id="email" name="email" type="email" autocomplete="username" required placeholder="name@utexas.edu"></label>
+    <label>Password<input id="password" name="password" type="password" autocomplete="current-password" required minlength="6"></label>
+    <button type="submit" id="auth-submit">Sign in</button>
+  </form>
+  <div class="actions" style="margin-top:16px">
+    <button type="button" class="secondary" id="toggle-register">Create an account</button>
+    <button type="button" class="ghost" id="send-reset">Forgot password</button>
+    <button type="button" class="ghost" id="resend-verify" hidden>Resend verification email</button>
+  </div>
+  <p class="muted">Self-registration is limited to exact allowed domains (default <code>utexas.edu</code>). Suffix lookalikes are rejected. After your email is verified, this page exchanges a short-lived ID token for an HttpOnly session cookie.</p>
+</section>
+<noscript><p class="error">JavaScript is required to sign in with Firebase Auth.</p></noscript>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
+import {
+  createUserWithEmailAndPassword,
+  getAuth,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  signOut,
+} from "https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js";
+
+const config = JSON.parse(document.getElementById("firebase-config").textContent);
+const allowedDomains = String(config.allowedDomains || "utexas.edu").split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
+const errorEl = document.getElementById("auth-error");
+const noticeEl = document.getElementById("auth-notice");
+const form = document.getElementById("auth-form");
+const submit = document.getElementById("auth-submit");
+const toggle = document.getElementById("toggle-register");
+const resetBtn = document.getElementById("send-reset");
+const resendBtn = document.getElementById("resend-verify");
+const emailInput = document.getElementById("email");
+const passwordInput = document.getElementById("password");
+
+const auth = getAuth(initializeApp({
+  apiKey: config.apiKey,
+  authDomain: config.authDomain,
+  projectId: config.projectId,
+  appId: config.appId,
+}));
+
+function showError(message) {
+  noticeEl.hidden = true;
+  errorEl.hidden = false;
+  errorEl.textContent = message;
+}
+
+function showNotice(message) {
+  errorEl.hidden = true;
+  noticeEl.hidden = false;
+  noticeEl.textContent = message;
+}
+
+function emailAllowed(email) {
+  const trimmed = String(email || "").trim();
+  if ((trimmed.match(/@/g) || []).length !== 1) return false;
+  const domain = trimmed.split("@")[1].toLowerCase();
+  return allowedDomains.includes(domain);
+}
+
+function domainError() {
+  return "Use a verified email at an allowed university domain. Addresses like user@notutexas.edu or user@utexas.edu.evil.com are not accepted.";
+}
+
+async function exchangeSession(user) {
+  if (!user.emailVerified) {
+    resendBtn.hidden = false;
+    throw new Error("Verify your email before signing in. Check your inbox, then try again.");
+  }
+  if (!emailAllowed(user.email || "")) {
+    await signOut(auth);
+    throw new Error(domainError());
+  }
+  const idToken = await user.getIdToken();
+  const response = await fetch("/session", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRF-Token": config.csrfToken || "",
+    },
+    body: JSON.stringify({ idToken, csrf_token: config.csrfToken }),
+  });
+  if (!response.ok) {
+    await signOut(auth).catch(() => {});
+    let message = "Could not start a session.";
+    try {
+      const body = await response.json();
+      message = body.detail || body.error || message;
+    } catch (_) {}
+    throw new Error(message);
+  }
+  await signOut(auth).catch(() => {});
+  window.location.assign("/");
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  resendBtn.hidden = true;
+  const email = emailInput.value.trim();
+  const password = passwordInput.value;
+  if (!emailAllowed(email)) {
+    showError(domainError());
+    return;
+  }
+  submit.disabled = true;
+  try {
+    if (form.dataset.mode === "register") {
+      const credential = await createUserWithEmailAndPassword(auth, email, password);
+      await sendEmailVerification(credential.user);
+      await signOut(auth);
+      showNotice("Account created. Verify your email, then sign in.");
+      form.dataset.mode = "signin";
+      submit.textContent = "Sign in";
+      toggle.textContent = "Create an account";
+      passwordInput.autocomplete = "current-password";
+      return;
+    }
+    const credential = await signInWithEmailAndPassword(auth, email, password);
+    await exchangeSession(credential.user);
+  } catch (err) {
+    showError(err && err.message ? err.message : "Sign-in failed.");
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+toggle.addEventListener("click", () => {
+  const register = form.dataset.mode !== "register";
+  form.dataset.mode = register ? "register" : "signin";
+  submit.textContent = register ? "Create account" : "Sign in";
+  toggle.textContent = register ? "Have an account? Sign in" : "Create an account";
+  passwordInput.autocomplete = register ? "new-password" : "current-password";
+  resendBtn.hidden = true;
+});
+
+resetBtn.addEventListener("click", async () => {
+  const email = emailInput.value.trim();
+  if (!emailAllowed(email)) {
+    showError(domainError());
+    return;
+  }
+  try {
+    await sendPasswordResetEmail(auth, email);
+  } catch (_) {}
+  showNotice("If that address has an account, a reset email was sent.");
+});
+
+resendBtn.addEventListener("click", async () => {
+  const email = emailInput.value.trim();
+  const password = passwordInput.value;
+  try {
+    const credential = await signInWithEmailAndPassword(auth, email, password);
+    if (credential.user.emailVerified) {
+      await exchangeSession(credential.user);
+      return;
+    }
+    await sendEmailVerification(credential.user);
+    await signOut(auth);
+    showNotice("Verification email sent. Check your inbox, then sign in.");
+  } catch (err) {
+    showError(err && err.message ? err.message : "Could not resend verification.");
+  }
+});
+</script>
+{% endblock %}

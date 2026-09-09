@@ -8,6 +8,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from paths import GROUND_TRUTH_DIR, SCHEMAS_DIR
+from workbook_catalog import build_catalog
 
 YEAR_PATTERN = re.compile(r"Bastrop County (\d{4}) Clean\.xlsx$")
 
@@ -34,6 +35,7 @@ def ingest() -> dict:
     SCHEMAS_DIR.mkdir(parents=True, exist_ok=True)
     (SCHEMAS_DIR / "ground_truth_index.json").write_text(json.dumps(index, indent=2))
     (SCHEMAS_DIR / "columns_by_decade.json").write_text(json.dumps(columns_by_decade, indent=2))
+    (SCHEMAS_DIR / "workbook_catalog.json").write_text(json.dumps(build_catalog(GROUND_TRUTH_DIR), indent=2))
     print(f"Indexed {len(index)} decades -> {SCHEMAS_DIR}")
     for year, meta in sorted(index.items()):
         print(f"  {year}: {len(meta['sheets'])} sheets ({meta['file']})")

@@ -1,6 +1,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 import compare
 
@@ -92,9 +93,58 @@ def test_1860_comparison_respects_selected_physical_page(tmp_path):
 
     metrics, rows = compare.compare(
         str(extracted), str(workbook), "Bastrop", 1860, 2,
+        ground_truth_row_range=(40, 80),
     )
 
     assert metrics["physical_page"] == 2
+    assert metrics["sheet"] == "Bastrop"
+    assert rows[0]["fields"]["Surname"]["match"] is True
+
+
+def test_compare_rejects_extraction_sheet_name_mismatch(tmp_path):
+    ground_truth = pd.DataFrame([
+        {"Line Number": 1, "Surname": "Lewis", "Given Name": "Jasper H", "Gender": "Male"},
+    ])
+    workbook = tmp_path / "1950.xlsx"
+    ground_truth.to_excel(workbook, sheet_name="Bastrop 11-2A", index=False)
+    extracted = tmp_path / "extracted.json"
+    extracted.write_text(json.dumps({
+        "census_year": 1950,
+        "schedule_type": "population",
+        "sheet_name": "Bastrop 11-2B",
+        "records": [{"Line Number": 1, "Surname": "Lewis", "Given Name": "Jasper H"}],
+    }))
+
+    with pytest.raises(ValueError, match="sheet_name"):
+        compare.compare(
+            str(extracted), str(workbook), "Bastrop 11-2A", 1950, 1,
+        )
+
+
+def test_compare_uses_selected_sheet_schema(tmp_path):
+    ground_truth = pd.DataFrame([
+        {"Line Number": 1, "Surname": "Lewis", "Given Name": "Jasper H", "Gender": "Male"},
+    ])
+    workbook = tmp_path / "1950.xlsx"
+    ground_truth.to_excel(workbook, sheet_name="Bastrop 11-2A", index=False)
+    extracted = tmp_path / "extracted.json"
+    extracted.write_text(json.dumps({
+        "census_year": 1950,
+        "schedule_type": "population",
+        "sheet_name": "Bastrop 11-2A",
+        "records": [{
+            "Line Number": 1,
+            "Surname": "Lewis",
+            "Given Name": "Jasper H",
+            "Gender": "Male",
+        }],
+    }))
+
+    metrics, rows = compare.compare(
+        str(extracted), str(workbook), "Bastrop 11-2A", 1950, 1,
+    )
+    assert metrics["sheet"] == "Bastrop 11-2A"
+    assert "Surname" in metrics["fields_compared"]
     assert rows[0]["fields"]["Surname"]["match"] is True
 
 

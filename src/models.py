@@ -155,6 +155,9 @@ class PageDiagnostics(BaseModel):
     duplicate_lines: list[int] = Field(default_factory=list)
     out_of_range_lines: list[int] = Field(default_factory=list)
     illegible_lines: list[int] = Field(default_factory=list)
+    retry_error: str | None = None
+    unassigned_records: list[dict] = Field(default_factory=list)
+    rejected_records: list[dict] = Field(default_factory=list)
     retry_attempted: bool = False
     retry_recovered_lines: list[int] = Field(default_factory=list)
     crops_used: int = 1
@@ -187,12 +190,10 @@ def to_gt_record(person: PersonRecord1950, gt_columns: dict[str, str] = FIELD_TO
 def get_year_models(
     year: int,
     schedule_type: str = "population",
+    sheet_name: str | None = None,
 ) -> tuple[type[BaseModel], type[BaseModel], dict[str, str]]:
     """Build Gemini-compatible fixed-shape models for one census form."""
-    if year == 1950 and schedule_type == "population":
-        return PersonRecord1950, ExtractionBatch, FIELD_TO_GT_COLUMN_1950
-
-    schema = get_census_schema(year, schedule_type)
+    schema = get_census_schema(year, schedule_type, sheet_name)
     gt_columns = field_mapping(schema)
     confidence_model = create_model(
         f"FieldConfidence{year}{schedule_type.title()}",
@@ -237,10 +238,11 @@ def to_year_gt_record(
     person: BaseModel,
     year: int,
     schedule_type: str = "population",
+    sheet_name: str | None = None,
 ) -> dict:
     """Map a typed record to exact ground-truth spreadsheet headings."""
-    schema = get_census_schema(year, schedule_type)
-    _, _, gt_columns = get_year_models(year, schedule_type)
+    schema = get_census_schema(year, schedule_type, sheet_name)
+    _, _, gt_columns = get_year_models(year, schedule_type, sheet_name)
     dumped = person.model_dump()
     output = {
         column: dumped.get(field_name)

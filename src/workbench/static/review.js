@@ -7,14 +7,39 @@ if (form) {
   const storageKey = "census-workbench-reviewer";
   const savedReviewer = localStorage.getItem(storageKey);
 
-  if (savedReviewer) reviewer.value = savedReviewer;
-  (savedReviewer && value ? value : reviewer).focus();
+  if (savedReviewer && reviewer) reviewer.value = savedReviewer;
+  (savedReviewer && value ? value : reviewer || value)?.focus();
 
   form.addEventListener("submit", () => {
-    if (reviewer.value.trim()) localStorage.setItem(storageKey, reviewer.value.trim());
+    if (reviewer?.value.trim()) localStorage.setItem(storageKey, reviewer.value.trim());
   });
 
-  reviewer.addEventListener("keydown", (event) => {
+  const leaseEndpoint = form.querySelector("[data-lease-renew-url]")?.dataset.leaseRenewUrl;
+  if (leaseEndpoint) {
+    const renewLease = async () => {
+      const body = new FormData();
+      ["csrf_token", "lease_token", "review_session"].forEach(name => {
+        const input = form.elements.namedItem(name);
+        if (input?.value) body.append(name, input.value);
+      });
+      const response = await fetch(leaseEndpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        body,
+      });
+      if (!response.ok) {
+        form.querySelector("[data-save-row]")?.setAttribute("disabled", "");
+        throw new Error("This edit reservation expired. Copy your draft, then reload.");
+      }
+    };
+    const interval = window.setInterval(() => renewLease().catch(error => {
+      window.clearInterval(interval);
+      window.alert(error.message);
+    }), 30_000);
+    window.addEventListener("pagehide", () => window.clearInterval(interval), {once: true});
+  }
+
+  reviewer?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
       if (value) value.focus();

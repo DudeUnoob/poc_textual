@@ -15,9 +15,9 @@ then measures how accurately it does so compared to human-cleaned records.
 error-prone on 19th–20th century handwriting. This project tests whether a
 frontier vision model can do better.
 
-**Model:** Google **Gemini 3.5 Flash** (`gemini-3.5-flash`) via the API. The local
-workbench reads three row bands concurrently and retains Gemini 3.1 Pro as an
-accuracy-escalation option.
+**Model:** Google **Gemini 3.8 Flash** (`gemini-3.8-flash`) via the API. New runs
+freeze their model, thinking level, prompt version, workbook schema, and source
+manifest so later configuration changes cannot rewrite historical results.
 No GPU and no model download required — extraction is a stateless API call.
 Gemini currently leads independent handwritten-form benchmarks (lowest free-text
 error rate), which is why it is the primary extractor here.
@@ -43,8 +43,10 @@ returns valid JSON directly — no markdown fences or structural drift.
 
 The same pipeline supports population schedules for 1850, 1860, 1870, 1880,
 1900, 1910, 1920, 1930, 1940, and 1950. The 1850 and 1860 slave schedules are
-also separate supported form types. Exact fields, row counts, column aliases,
-comparison priorities, and crop geometry live in `src/census_schemas.py`.
+also separate supported form types. Exact fields and labels come from the
+cleaned XLSX workbooks through `schemas/workbook_catalog.json`; stable aliases,
+row counts, comparison priorities, and validated crop geometry live in
+`src/workbook_catalog.py` and `src/census_schemas.py`.
 1950 has calibrated crop geometry; other forms use a safe full-page pass until
 representative scans are calibrated.
 

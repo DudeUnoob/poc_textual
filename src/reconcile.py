@@ -68,10 +68,14 @@ def _merge_sources(
     seen_in: dict[int, list[str]] = {}
 
     for source, records in per_source.items():
+        source_lines = set()
         for rec in records:
             ln = rec.line_number
             if ln is None:
                 continue
+            if ln in source_lines:
+                raise ValueError(f"Duplicate physical line {ln} within source {source}; resolve instead of overwriting.")
+            source_lines.add(ln)
             if ln not in valid_range:
                 out_of_range.append(ln)
                 continue
@@ -85,6 +89,8 @@ def reconcile_page(
     per_source: dict[str, list[BaseModel]],
     expected_lines: int = 30,
     retry_fn: Callable[[list[int]], list[BaseModel]] | None = None,
+    *,
+    line_start: int = 1,
 ) -> tuple[list[BaseModel], PageDiagnostics]:
     """Merge passes, run one targeted retry for gaps, return sorted records.
 
@@ -94,7 +100,9 @@ def reconcile_page(
         retry_fn: called once with the list of missing line numbers; should
             return records for a targeted crop covering them. If None, no retry.
     """
-    valid_range = range(1, expected_lines + 1)
+    if expected_lines < 1 or line_start < 1:
+        raise ValueError("Expected line count and starting line must be positive.")
+    valid_range = range(line_start, line_start + expected_lines)
     best, out_of_range, seen_in = _merge_sources(per_source, valid_range)
 
     expected = list(valid_range)
@@ -104,6 +112,11 @@ def reconcile_page(
         expected_lines=expected,
         out_of_range_lines=out_of_range,
         crops_used=len(per_source),
+        unassigned_records=[{"source": source, "record": rec.model_dump(mode="json")}
+                            for source, records in per_source.items() for rec in records if rec.line_number is None],
+        rejected_records=[{"source": source, "record": rec.model_dump(mode="json")}
+                          for source, records in per_source.items() for rec in records
+                          if rec.line_number is not None and rec.line_number not in valid_range],
     )
 
     # One targeted retry for the missing lines.
@@ -111,8 +124,21 @@ def reconcile_page(
         diagnostics.retry_attempted = True
         try:
             retry_records = retry_fn(missing)
-        except Exception:
+        except Exception as exc:
+            diagnostics.retry_error = type(exc).__name__
             retry_records = []
+        # Validate duplicates before applying any retry result.
+        _merge_sources({"retry": retry_records}, valid_range)
+        diagnostics.unassigned_records.extend(
+            {"source": "retry", "record": rec.model_dump(mode="json")}
+            for rec in retry_records if rec.line_number is None
+        )
+        diagnostics.rejected_records.extend(
+            {"source": "retry", "record": rec.model_dump(mode="json")}
+            for rec in retry_records if rec.line_number is not None and rec.line_number not in valid_range
+        )
+        diagnostics.out_of_range_lines = sorted(set(diagnostics.out_of_range_lines) |
+            {rec.line_number for rec in retry_records if rec.line_number is not None and rec.line_number not in valid_range})
         per_source["retry"] = retry_records
         for rec in retry_records:
             ln = rec.line_number

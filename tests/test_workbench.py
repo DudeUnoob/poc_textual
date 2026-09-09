@@ -39,6 +39,21 @@ def test_parse_image_hints_and_manifest_confirmation(tmp_path, monkeypatch):
         assert pages[0].metadata_confirmed is True
 
 
+def test_import_rejects_image_over_configured_limit(tmp_path, monkeypatch):
+    Batch, _, SessionLocal, _, import_files, *_ = _workbench(tmp_path, monkeypatch)
+    monkeypatch.setenv("WORKBENCH_MAX_UPLOAD_BYTES", "10")
+    with SessionLocal() as session:
+        batch = Batch(
+            name="B", county="Bastrop", state="Texas",
+            census_year=1950, enumeration_district="11-1",
+        )
+        session.add(batch)
+        session.flush()
+        page = import_files(session, batch, [_upload("sheet_01.jpg")])[0]
+        assert "WORKBENCH_MAX_UPLOAD_BYTES" in page.import_error
+        assert page.stored_path == ""
+
+
 def test_review_decision_is_append_only(tmp_path, monkeypatch):
     Batch, Page, SessionLocal, _, _, _, _, decide = _workbench(tmp_path, monkeypatch)
     from workbench.db import ExtractionRun, FieldCandidate
@@ -56,7 +71,8 @@ def test_review_decision_is_append_only(tmp_path, monkeypatch):
         first = decide(session, candidate, "DK", "corrected", "White", "clear handwriting")
         second = decide(session, candidate, "DK", "confirmed", None, None)
         assert first.previous_value == "Wite"
-        assert second.previous_value == "Wite"
+        assert second.previous_value == "White"
+        assert second.value == "White"
         assert len(candidate.decisions) == 2
 
 
@@ -130,7 +146,7 @@ def test_reclassify_run_excludes_calibration_page(tmp_path, monkeypatch):
         session.flush()
         services.reclassify_run_candidates(session, run.id, exclude_page_ids={page1.id})
         assert candidates[0].status == "review_required"
-        assert candidates[1].status == "auto_accepted"
+        assert candidates[1].status == "review_required"
 
 
 def test_review_queue_advances_past_skipped_and_deferred_fields(tmp_path, monkeypatch):
@@ -182,8 +198,9 @@ def test_run_snapshot_exposes_queue_and_live_progress(tmp_path, monkeypatch):
         assert running["step_elapsed_seconds"] is not None
 
         run.status = "completed"
-        from datetime import datetime, timedelta
-        run.started_at = datetime.utcnow()
+        from datetime import timedelta
+        from workbench.db import utc_now
+        run.started_at = utc_now()
         run.finished_at = run.started_at + timedelta(seconds=125)
         completed = run_snapshot(session, run)
         assert completed["terminal"] is True
