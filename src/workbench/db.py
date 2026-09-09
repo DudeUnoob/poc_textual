@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Generator
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, create_engine, event
+from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Integer, JSON,
+                        String, Text, create_engine, event, inspect, text)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from .config import DATABASE_URL, ensure_directories
@@ -20,6 +21,7 @@ class Batch(Base):
     county: Mapped[str] = mapped_column(String(120))
     state: Mapped[str] = mapped_column(String(80))
     census_year: Mapped[int] = mapped_column(Integer)
+    schedule_type: Mapped[str] = mapped_column(String(20), default="population")
     enumeration_district: Mapped[str] = mapped_column(String(80))
     source_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
     ground_truth_path: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -51,7 +53,7 @@ class ExtractionRun(Base):
     batch_id: Mapped[int] = mapped_column(ForeignKey("batches.id"), index=True)
     status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
     model: Mapped[str] = mapped_column(String(200))
-    prompt_version: Mapped[str] = mapped_column(String(80), default="1950-v3")
+    prompt_version: Mapped[str] = mapped_column(String(80), default="schema-v1")
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -101,6 +103,7 @@ class CalibrationBand(Base):
     __tablename__ = "calibration_bands"
     id: Mapped[int] = mapped_column(primary_key=True)
     census_year: Mapped[int] = mapped_column(Integer, index=True)
+    schedule_type: Mapped[str] = mapped_column(String(20), default="population")
     field_name: Mapped[str] = mapped_column(String(120), index=True)
     confidence: Mapped[str] = mapped_column(String(12))
     total: Mapped[int] = mapped_column(Integer, default=0)
@@ -139,6 +142,23 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 def init_db() -> None:
     ensure_directories()
     Base.metadata.create_all(bind=engine)
+    columns = {column["name"] for column in inspect(engine).get_columns("batches")}
+    if "schedule_type" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE batches ADD COLUMN schedule_type "
+                "VARCHAR(20) NOT NULL DEFAULT 'population'"
+            ))
+    calibration_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("calibration_bands")
+    }
+    if "schedule_type" not in calibration_columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE calibration_bands ADD COLUMN schedule_type "
+                "VARCHAR(20) NOT NULL DEFAULT 'population'"
+            ))
 
 
 def session_scope() -> Generator:

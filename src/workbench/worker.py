@@ -113,7 +113,8 @@ def process_next_run() -> bool:
                     session.commit()
 
                 records, diagnostics, candidates = extract_with_review_data(
-                    page.stored_path, page.batch.census_year, model=model,
+                    page.stored_path, page.batch.census_year,
+                    schedule_type=page.batch.schedule_type, model=model,
                     event_callback=on_extraction_event,
                     use_crops=bool((run.config or {}).get("use_crops", True)),
                     expected_lines=int((run.config or {}).get("expected_lines", 30)),
@@ -122,6 +123,7 @@ def process_next_run() -> bool:
                     parallelism=int((run.config or {}).get("parallelism", 3)),
                 )
                 payload = {"source_image": page.stored_path, "census_year": page.batch.census_year,
+                           "schedule_type": page.batch.schedule_type,
                            "model": model, "records": records, "diagnostics": diagnostics,
                            "field_candidates": candidates}
                 output_path = RUNS_DIR / f"run_{run_id}" / f"page_{page.id}.json"

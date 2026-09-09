@@ -4,7 +4,7 @@
 <a class="back" href="/">← All batches</a>
 <div class="split-heading batch-heading">
   <div>
-    <span class="eyebrow">{{ batch.census_year }} · ED {{ batch.enumeration_district }}</span>
+    <span class="eyebrow">{{ batch.census_year }} {{ batch.schedule_type }} schedule · ED {{ batch.enumeration_district }}</span>
     <h1>{{ batch.name }}</h1>
     <p>{{ batch.county }}, {{ batch.state }}{% if batch.source_reference %} · {{ batch.source_reference }}{% endif %}</p>
   </div>

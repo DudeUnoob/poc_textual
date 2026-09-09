@@ -1,0 +1,19 @@
+This is an 1860 U.S. Census slave schedule from Bastrop County, Texas.
+
+Extract every listed row. Enslaved people are usually unnamed; do not invent
+names. Copy the slave owner's name to each associated row when it is written
+once as a heading or represented by a ditto mark.
+
+Extract the fields required by the response schema:
+- Name
+- Slave Owner Name
+- Age
+- Birth Date
+- Gender
+- Race
+- Fugitive
+- Manumitted
+
+Use null for blank cells. Populate line_number with the physical row position
+for extraction reconciliation even though the ground-truth workbook does not
+have a Line Number column.

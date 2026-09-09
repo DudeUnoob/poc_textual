@@ -13,7 +13,6 @@ import pandas as pd
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, joinedload
 
-from models import FIELD_TO_GT_COLUMN_1950
 from validate import validate_records
 
 from .config import (EXPORTS_DIR, MIN_CALIBRATION_SAMPLES, PRECISION_TARGET,
@@ -108,7 +107,7 @@ def priority_for(candidate: dict, warnings: list[str], year: int) -> int:
     value = candidate.get("normalized_value")
     if value in (None, "") or candidate.get("row_legibility") == "illegible":
         return 0
-    if candidate["field"] in {"Race", "Gender"}:
+    if candidate["field"] in {"Race", "Gender", "Sex"}:
         return 1
     if warnings:
         return 2
@@ -117,9 +116,16 @@ def priority_for(candidate: dict, warnings: list[str], year: int) -> int:
     return 4
 
 
-def calibration_allows(session: Session, year: int, field: str, confidence: str) -> bool:
+def calibration_allows(
+    session: Session,
+    year: int,
+    schedule_type: str,
+    field: str,
+    confidence: str,
+) -> bool:
     band = session.scalar(select(CalibrationBand).where(
         CalibrationBand.census_year == year,
+        CalibrationBand.schedule_type == schedule_type,
         CalibrationBand.field_name == field,
         CalibrationBand.confidence == confidence,
     ))
@@ -135,10 +141,11 @@ def persist_extraction(session: Session, run: ExtractionRun, page: Page, payload
     """Persist a run payload without overwriting an earlier draft or decision."""
     year = page.batch.census_year
     records = payload["records"]
+    validated_records = validate_records([dict(record) for record in records], year)
     warnings_by_line = {
-        int(record.get("Line Number")): record.get("_warnings", [])
-        for record in validate_records([dict(record) for record in records], year)
-        if record.get("Line Number") is not None
+        int(record.get("Line Number") or record.get("_line_number") or index):
+            record.get("_warnings", [])
+        for index, record in enumerate(validated_records, start=1)
     }
     for item in payload.get("field_candidates", []):
         line = int(item["line_number"])
@@ -151,7 +158,9 @@ def persist_extraction(session: Session, run: ExtractionRun, page: Page, payload
             and not item.get("conflict")
             and not warnings
             and item.get("normalized_value") not in (None, "")
-            and calibration_allows(session, year, item["field"], "high")
+            and calibration_allows(
+                session, year, page.batch.schedule_type, item["field"], "high"
+            )
         )
         sampled = can_auto_accept and deterministic_sample(page.id, line, item["field"])
         status = "sample_review" if sampled else ("auto_accepted" if can_auto_accept else "review_required")
@@ -253,6 +262,7 @@ def reclassify_run_candidates(session: Session, run_id: int,
             and candidate.normalized_value not in (None, "")
             and calibration_allows(
                 session, candidate.page.batch.census_year,
+                candidate.page.batch.schedule_type,
                 candidate.field_name, "high",
             )
         )
@@ -301,7 +311,7 @@ def canonical_value(candidate: FieldCandidate) -> str | None:
 
 
 def create_export(session: Session, batch: Batch) -> Export:
-    schema = get_schema(batch.census_year)
+    schema = get_schema(batch.census_year, batch.schedule_type)
     version = (session.scalar(select(Export.version).where(Export.batch_id == batch.id).order_by(Export.version.desc())) or 0) + 1
     target = EXPORTS_DIR / f"batch_{batch.id}" / f"v{version:03d}"
     target.mkdir(parents=True, exist_ok=False)
@@ -331,8 +341,10 @@ def create_export(session: Session, batch: Batch) -> Export:
                 ],
             })
         for line, values in sorted(by_line.items()):
-            row = {"Page Number": page.page_number, "Line Number": line}
-            row.update({field: values.get(field) for field in schema.fields})
+            row = {"Page Number": page.page_number}
+            if schema.has_ground_truth_line_number:
+                row["Line Number"] = line
+            row.update({field: values.get(field) for field in schema.columns})
             rows.append(row)
     pd.DataFrame(rows).to_csv(target / "reviewed_records.csv", index=False)
     pd.DataFrame(rows).to_excel(target / "reviewed_records.xlsx", index=False)

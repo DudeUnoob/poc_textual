@@ -20,8 +20,11 @@ Design notes:
 from __future__ import annotations
 
 from enum import Enum
+from functools import lru_cache
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
+
+from census_schemas import field_mapping, get_census_schema
 
 
 class Legibility(str, Enum):
@@ -178,3 +181,73 @@ def to_gt_record(person: PersonRecord1950, gt_columns: dict[str, str] = FIELD_TO
     for field_name, gt_col in gt_columns.items():
         out[gt_col] = dumped.get(field_name)
     return out
+
+
+@lru_cache(maxsize=None)
+def get_year_models(
+    year: int,
+    schedule_type: str = "population",
+) -> tuple[type[BaseModel], type[BaseModel], dict[str, str]]:
+    """Build Gemini-compatible fixed-shape models for one census form."""
+    if year == 1950 and schedule_type == "population":
+        return PersonRecord1950, ExtractionBatch, FIELD_TO_GT_COLUMN_1950
+
+    schema = get_census_schema(year, schedule_type)
+    gt_columns = field_mapping(schema)
+    confidence_model = create_model(
+        f"FieldConfidence{year}{schedule_type.title()}",
+        __base__=BaseModel,
+        **{
+            field_name: (FieldConfidence | None, None)
+            for field_name in gt_columns
+        },
+    )
+    record_model = create_model(
+        f"PersonRecord{year}{schedule_type.title()}",
+        __base__=BaseModel,
+        line_number=(
+            int | None,
+            Field(
+                default=None,
+                description="Physical-form row number used to align extraction passes.",
+            ),
+        ),
+        **{
+            field_name: (
+                str | int | None,
+                Field(default=None, description=f"{column} exactly as written."),
+            )
+            for field_name, column in gt_columns.items()
+        },
+        legibility=(Legibility, Field(default=Legibility.clear)),
+        field_confidence=(
+            confidence_model,
+            Field(default_factory=confidence_model),
+        ),
+    )
+    batch_model = create_model(
+        f"ExtractionBatch{year}{schedule_type.title()}",
+        __base__=BaseModel,
+        records=(list[record_model], Field(default_factory=list)),
+    )
+    return record_model, batch_model, gt_columns
+
+
+def to_year_gt_record(
+    person: BaseModel,
+    year: int,
+    schedule_type: str = "population",
+) -> dict:
+    """Map a typed record to exact ground-truth spreadsheet headings."""
+    schema = get_census_schema(year, schedule_type)
+    _, _, gt_columns = get_year_models(year, schedule_type)
+    dumped = person.model_dump()
+    output = {
+        column: dumped.get(field_name)
+        for field_name, column in gt_columns.items()
+    }
+    if schema.has_ground_truth_line_number:
+        output["Line Number"] = dumped.get("line_number")
+    else:
+        output["_line_number"] = dumped.get("line_number")
+    return output

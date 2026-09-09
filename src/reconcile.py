@@ -20,7 +20,9 @@ from __future__ import annotations
 
 from typing import Callable
 
-from models import Legibility, PageDiagnostics, PersonRecord1950
+from pydantic import BaseModel
+
+from models import Legibility, PageDiagnostics
 
 # Higher = preferred when legibility and completeness tie.
 _SOURCE_PRIORITY = {"retry": 3, "crop": 2, "full_page": 1}
@@ -33,13 +35,13 @@ def _source_priority(source: str) -> int:
     return _SOURCE_PRIORITY.get(source, 0)
 
 
-def _completeness(rec: PersonRecord1950) -> int:
+def _completeness(rec: BaseModel) -> int:
     dumped = rec.model_dump()
     return sum(1 for k, v in dumped.items() if k != "legibility" and v is not None)
 
 
-def _is_better(candidate: tuple[PersonRecord1950, str],
-               current: tuple[PersonRecord1950, str]) -> bool:
+def _is_better(candidate: tuple[BaseModel, str],
+               current: tuple[BaseModel, str]) -> bool:
     """True if candidate (record, source) should replace current."""
     c_rec, c_src = candidate
     o_rec, o_src = current
@@ -54,14 +56,14 @@ def _is_better(candidate: tuple[PersonRecord1950, str],
 
 
 def _merge_sources(
-    per_source: dict[str, list[PersonRecord1950]],
+    per_source: dict[str, list[BaseModel]],
     valid_range: range,
-) -> tuple[dict[int, tuple[PersonRecord1950, str]], list[int], dict[int, list[str]]]:
+) -> tuple[dict[int, tuple[BaseModel, str]], list[int], dict[int, list[str]]]:
     """Merge all passes into best-record-per-line.
 
     Returns (best_by_line, out_of_range_lines, seen_in_sources).
     """
-    best: dict[int, tuple[PersonRecord1950, str]] = {}
+    best: dict[int, tuple[BaseModel, str]] = {}
     out_of_range: list[int] = []
     seen_in: dict[int, list[str]] = {}
 
@@ -80,10 +82,10 @@ def _merge_sources(
 
 
 def reconcile_page(
-    per_source: dict[str, list[PersonRecord1950]],
+    per_source: dict[str, list[BaseModel]],
     expected_lines: int = 30,
-    retry_fn: Callable[[list[int]], list[PersonRecord1950]] | None = None,
-) -> tuple[list[PersonRecord1950], PageDiagnostics]:
+    retry_fn: Callable[[list[int]], list[BaseModel]] | None = None,
+) -> tuple[list[BaseModel], PageDiagnostics]:
     """Merge passes, run one targeted retry for gaps, return sorted records.
 
     Args:

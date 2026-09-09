@@ -1,4 +1,4 @@
-"""Record measured confidence precision from a cleaned 1950 physical page.
+"""Record measured confidence precision from a cleaned physical census page.
 
 Usage:
 python -m workbench.calibrate --extracted path/to/page.json --ground-truth clean.xlsx \
@@ -17,10 +17,20 @@ from compare import compare
 from .db import CalibrationBand, SessionLocal, init_db
 
 
-def record_calibration(extracted: str, ground_truth: str, sheet: str, page: int, year: int) -> dict:
-    metrics, rows = compare(extracted, ground_truth, sheet, year, page)
+def record_calibration(
+    extracted: str,
+    ground_truth: str,
+    sheet: str,
+    page: int,
+    year: int,
+    schedule_type: str = "population",
+) -> dict:
     with open(extracted) as fh:
         payload = json.load(fh)
+    schedule_type = payload.get("schedule_type", schedule_type)
+    metrics, rows = compare(
+        extracted, ground_truth, sheet, year, page, schedule_type
+    )
     candidates = {
         (int(c["line_number"]), c["field"]): c
         for c in payload.get("field_candidates", [])
@@ -39,11 +49,16 @@ def record_calibration(extracted: str, ground_truth: str, sheet: str, page: int,
     with SessionLocal() as session:
         for (field, confidence), matches in observed.items():
             band = session.scalar(select(CalibrationBand).where(
-                CalibrationBand.census_year == year, CalibrationBand.field_name == field,
+                CalibrationBand.census_year == year,
+                CalibrationBand.schedule_type == schedule_type,
+                CalibrationBand.field_name == field,
                 CalibrationBand.confidence == confidence,
             ))
             if band is None:
-                band = CalibrationBand(census_year=year, field_name=field, confidence=confidence)
+                band = CalibrationBand(
+                    census_year=year, schedule_type=schedule_type,
+                    field_name=field, confidence=confidence,
+                )
                 session.add(band)
             band.total = (band.total or 0) + len(matches)
             band.correct = (band.correct or 0) + sum(matches)
@@ -59,9 +74,14 @@ def main() -> None:
     parser.add_argument("--sheet", required=True)
     parser.add_argument("--page", required=True, type=int)
     parser.add_argument("--year", required=True, type=int)
+    parser.add_argument("--schedule", default="population",
+                        choices=["population", "slave"])
     args = parser.parse_args()
     init_db()
-    print(json.dumps(record_calibration(args.extracted, args.ground_truth, args.sheet, args.page, args.year), indent=2))
+    print(json.dumps(record_calibration(
+        args.extracted, args.ground_truth, args.sheet, args.page,
+        args.year, args.schedule,
+    ), indent=2))
 
 
 if __name__ == "__main__":

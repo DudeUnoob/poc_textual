@@ -41,6 +41,13 @@ pipeline maximizes accuracy with:
 Output is schema-constrained via Pydantic (`response_schema`), so the model
 returns valid JSON directly — no markdown fences or structural drift.
 
+The same pipeline supports population schedules for 1850, 1860, 1870, 1880,
+1900, 1910, 1920, 1930, 1940, and 1950. The 1850 and 1860 slave schedules are
+also separate supported form types. Exact fields, row counts, column aliases,
+comparison priorities, and crop geometry live in `src/census_schemas.py`.
+1950 has calibrated crop geometry; other forms use a safe full-page pass until
+representative scans are calibrated.
+
 ---
 
 ## Quick Start
@@ -55,6 +62,9 @@ cp .env.example .env        # add your GEMINI_API_KEY
 # Extract one sheet (positional args: IMAGE YEAR [OUTPUT] [MODEL] [nocrops])
 python src/extract.py data/raw_images/1950_11-1/sheet_01.jpg 1950 \
   data/outputs/1950_11-1/sheet_01_extracted.json
+
+# Slave schedules use the same command with an explicit form type
+python src/extract.py path/to/1860_slave.jpg 1860 output.json --schedule slave
 
 # Compare against ground truth.
 # --sheet and --page are both required: a ground-truth workbook sheet
@@ -152,7 +162,8 @@ PYTHONPATH=src uvicorn workbench.web:app --reload
 PYTHONPATH=src python -m workbench.worker
 ```
 
-Open http://127.0.0.1:8000, import a folder of 1950 images, confirm each page's
+Open http://127.0.0.1:8000, select a supported year and schedule type, import
+the image folder, confirm each page's
 physical order/type, and queue a run. The worker processes only confirmed census
 pages. Reviewers are required to enter a name or initials; every decision is
 append-only. Exports are written under `data/workbench/exports/` as CSV, XLSX,

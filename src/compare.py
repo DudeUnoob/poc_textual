@@ -22,15 +22,13 @@ import json
 import pandas as pd
 import argparse
 import sys
+import math
 from pathlib import Path
 from fuzzywuzzy import fuzz
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from census_schemas import get_census_schema
 from paths import RESULTS_DIR
-from utils import HAS_LINE_NUMBER, COMPARE_FIELDS_1950, PRIORITY_FIELDS_1950
-
-COMPARE_FIELDS_BY_YEAR = {1950: COMPARE_FIELDS_1950}
-PRIORITY_FIELDS_BY_YEAR = {1950: PRIORITY_FIELDS_1950}
 
 # Keyword → match strategy. Order matters: more specific keywords first.
 STRATEGY_KEYWORDS = [
@@ -115,8 +113,90 @@ def split_into_physical_pages(gt_df: pd.DataFrame, line_col: str) -> list[pd.Dat
     return pages
 
 
+def align_by_household_order(
+    extracted_records: list[dict],
+    ground_truth_records: list[dict],
+) -> tuple[dict[int, dict], dict[int, dict]]:
+    """Sequence-align no-line forms without hiding missing or extra rows."""
+    def match_score(extracted: dict, ground_truth: dict) -> int:
+        score = 0
+        extracted_household = (
+            _norm(extracted.get("Dwelling Number")),
+            _norm(extracted.get("Family Number")),
+        )
+        ground_truth_household = (
+            _norm(ground_truth.get("Dwelling Number")),
+            _norm(ground_truth.get("Family Number")),
+        )
+        if any(extracted_household) and any(ground_truth_household):
+            score += 8 if extracted_household == ground_truth_household else -5
+        for field in ("Surname", "Given Name", "Slave Owner Name", "Age"):
+            extracted_value = _norm(extracted.get(field))
+            ground_truth_value = _norm(ground_truth.get(field))
+            if not extracted_value or not ground_truth_value:
+                continue
+            score += 2 if fuzz.ratio(extracted_value, ground_truth_value) >= 85 else -1
+        return score
+
+    row_count = len(extracted_records)
+    truth_count = len(ground_truth_records)
+    gap_penalty = -3
+    scores = [[0] * (truth_count + 1) for _ in range(row_count + 1)]
+    moves = [[""] * (truth_count + 1) for _ in range(row_count + 1)]
+    for row in range(1, row_count + 1):
+        scores[row][0] = row * gap_penalty
+        moves[row][0] = "extra"
+    for column in range(1, truth_count + 1):
+        scores[0][column] = column * gap_penalty
+        moves[0][column] = "missing"
+    for row in range(1, row_count + 1):
+        for column in range(1, truth_count + 1):
+            options = (
+                (
+                    scores[row - 1][column - 1]
+                    + match_score(
+                        extracted_records[row - 1],
+                        ground_truth_records[column - 1],
+                    ),
+                    "match",
+                ),
+                (scores[row - 1][column] + gap_penalty, "extra"),
+                (scores[row][column - 1] + gap_penalty, "missing"),
+            )
+            scores[row][column], moves[row][column] = max(options, key=lambda item: item[0])
+
+    aligned_pairs: list[tuple[dict | None, dict | None]] = []
+    row, column = row_count, truth_count
+    while row or column:
+        move = moves[row][column]
+        if move == "match":
+            aligned_pairs.append((
+                extracted_records[row - 1],
+                ground_truth_records[column - 1],
+            ))
+            row -= 1
+            column -= 1
+        elif move == "extra":
+            aligned_pairs.append((extracted_records[row - 1], None))
+            row -= 1
+        else:
+            aligned_pairs.append((None, ground_truth_records[column - 1]))
+            column -= 1
+    aligned_pairs.reverse()
+
+    extracted_by_row: dict[int, dict] = {}
+    ground_truth_by_row: dict[int, dict] = {}
+    for row_number, (extracted, ground_truth) in enumerate(aligned_pairs, start=1):
+        if extracted is not None:
+            extracted_by_row[row_number] = extracted
+        if ground_truth is not None:
+            ground_truth_by_row[row_number] = ground_truth
+    return extracted_by_row, ground_truth_by_row
+
+
 def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
-            physical_page: int) -> tuple[dict, list]:
+            physical_page: int,
+            schedule_type: str = "population") -> tuple[dict, list]:
     """
     Compare extracted records against ONE physical page of ground truth.
 
@@ -129,46 +209,54 @@ def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
         data = json.load(f)
     records = data["records"]
     extraction_diag = data.get("diagnostics", {})
+    schedule_type = data.get("schedule_type", schedule_type)
+    schema = get_census_schema(year, schedule_type)
 
     gt_df = load_ground_truth(gt_xlsx, gt_sheet)
-
-    if not HAS_LINE_NUMBER.get(year, True):
-        raise ValueError(
-            f"{year} sheets have no Line Number column (confirmed absent in "
-            f"all 1860 sheets). Row alignment needs a different key for this "
-            f"decade -- do not assume line-number join will work."
-        )
-
     line_col = find_line_number_column(gt_df.columns)
-    if line_col is None:
-        raise ValueError(f"No 'Line Number' column found in sheet '{gt_sheet}'.")
-
-    pages = split_into_physical_pages(gt_df, line_col)
-    if not (1 <= physical_page <= len(pages)):
+    if schema.has_ground_truth_line_number:
+        if line_col is None:
+            raise ValueError(f"No 'Line Number' column found in sheet '{gt_sheet}'.")
+        pages = split_into_physical_pages(gt_df, line_col)
+    else:
+        pages = [
+            gt_df.iloc[start:start + schema.expected_lines].reset_index(drop=True)
+            for start in range(0, len(gt_df), schema.expected_lines)
+        ]
+    page_count = (
+        len(pages) if schema.has_ground_truth_line_number
+        else math.ceil(len(gt_df) / schema.expected_lines)
+    )
+    if not (1 <= physical_page <= page_count):
         raise ValueError(
             f"physical_page={physical_page} out of range -- sheet '{gt_sheet}' "
-            f"contains {len(pages)} physical pages (1..{len(pages)})."
+            f"contains approximately {page_count} physical pages (1..{page_count})."
         )
     page_df = pages[physical_page - 1]
 
     gt_records = page_df.to_dict(orient="records")
-    ext_by_line = {int(r["Line Number"]): r for r in records if r.get("Line Number") is not None}
-    gt_by_line = {int(r[line_col]): r for r in gt_records if r.get(line_col) is not None}
-
-    allowlist = COMPARE_FIELDS_BY_YEAR.get(year)
-    if allowlist:
-        compare_columns = [c for c in allowlist if c in page_df.columns]
+    if schema.has_ground_truth_line_number:
+        ext_by_line = {
+            int(record["Line Number"]): record
+            for record in records
+            if record.get("Line Number") is not None
+        }
+        gt_by_line = {
+            int(record[line_col]): record
+            for record in gt_records
+            if record.get(line_col) is not None
+        }
     else:
-        extracted_keys = {k for r in records for k in r if k != line_col}
-        compare_columns = [c for c in page_df.columns if c and c != line_col and c in extracted_keys]
+        ext_by_line, gt_by_line = align_by_household_order(records, gt_records)
 
-    priority_fields = PRIORITY_FIELDS_BY_YEAR.get(year, [])
+    compare_columns = [column for column in schema.columns if column in page_df.columns]
+    priority_fields = schema.priority_fields
     results = []
     field_scores = {c: [] for c in compare_columns}
     priority_scores = {c: [] for c in compare_columns if c in priority_fields}
 
-    for line_num in sorted(gt_by_line.keys()):
-        gt_row = gt_by_line[line_num]
+    for line_num in sorted(set(gt_by_line) | set(ext_by_line)):
+        gt_row = gt_by_line.get(line_num, {})
         ext_row = ext_by_line.get(line_num, {})
 
         row_result = {"line_number": line_num, "all_match": True, "fields": {}}
@@ -204,9 +292,10 @@ def compare(extracted_json: str, gt_xlsx: str, gt_sheet: str, year: int,
     priority_scored = {f: sum(s) / len(s) for f, s in priority_scores.items() if s}
     metrics = {
         "census_year": year,
+        "schedule_type": schedule_type,
         "sheet": gt_sheet,
         "physical_page": physical_page,
-        "total_physical_pages_in_sheet": len(pages),
+        "total_physical_pages_in_sheet": page_count,
         "rows_compared": n,
         "row_accuracy": sum(r["all_match"] for r in results) / n if n else 0,
         "avg_row_field_match_rate": (
@@ -280,13 +369,15 @@ if __name__ == "__main__":
     parser.add_argument("--ground-truth", required=True)
     parser.add_argument("--sheet", required=True)
     parser.add_argument("--year", type=int, required=True)
+    parser.add_argument("--schedule", default="population",
+                        choices=["population", "slave"])
     parser.add_argument("--page", type=int, required=True,
                         help="1-indexed physical page within --sheet, matching your scan")
     parser.add_argument("--save", default=str(RESULTS_DIR / "comparison.json"))
     args = parser.parse_args()
 
     metrics, results = compare(args.extracted, args.ground_truth, args.sheet,
-                                args.year, args.page)
+                                args.year, args.page, args.schedule)
     print_report(metrics)
 
     Path(args.save).parent.mkdir(parents=True, exist_ok=True)

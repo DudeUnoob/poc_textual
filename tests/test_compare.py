@@ -1,3 +1,7 @@
+import json
+
+import pandas as pd
+
 import compare
 
 
@@ -28,6 +32,70 @@ def test_field_match_numeric_rejects_real_mismatch():
 
 def test_field_match_numeric_within_tolerance():
     assert compare.field_match("3", "2", "numeric") is True
+
+
+def test_align_by_household_order_handles_repeated_family_members():
+    extracted = [
+        {"Dwelling Number": 7, "Family Number": 8, "Surname": "A"},
+        {"Dwelling Number": 7, "Family Number": 8, "Surname": "B"},
+    ]
+    ground_truth = [
+        {"Dwelling Number": 1, "Family Number": 1, "Surname": "Earlier"},
+        {"Dwelling Number": 7, "Family Number": 8, "Surname": "A"},
+        {"Dwelling Number": 7, "Family Number": 8, "Surname": "B"},
+    ]
+    aligned_extracted, aligned_truth = compare.align_by_household_order(
+        extracted, ground_truth
+    )
+    matched_rows = sorted(set(aligned_extracted) & set(aligned_truth))
+    assert [aligned_truth[row]["Surname"] for row in matched_rows] == ["A", "B"]
+
+
+def test_align_by_household_order_keeps_missing_ground_truth_rows():
+    extracted = [
+        {"Dwelling Number": 7, "Family Number": 8, "Surname": "A"},
+        {"Dwelling Number": 7, "Family Number": 8, "Surname": "C"},
+    ]
+    ground_truth = [
+        {"Dwelling Number": 7, "Family Number": 8, "Surname": "A"},
+        {"Dwelling Number": 7, "Family Number": 8, "Surname": "B"},
+        {"Dwelling Number": 7, "Family Number": 8, "Surname": "C"},
+    ]
+    aligned_extracted, aligned_truth = compare.align_by_household_order(
+        extracted, ground_truth
+    )
+    missing_rows = set(aligned_truth) - set(aligned_extracted)
+    assert len(missing_rows) == 1
+    assert aligned_truth[missing_rows.pop()]["Surname"] == "B"
+
+
+def test_1860_comparison_respects_selected_physical_page(tmp_path):
+    ground_truth = pd.DataFrame([
+        {
+            "Dwelling Number": row,
+            "Family Number": row,
+            "Surname": f"Family{row}",
+        }
+        for row in range(1, 81)
+    ])
+    workbook = tmp_path / "1860.xlsx"
+    ground_truth.to_excel(workbook, sheet_name="Bastrop", index=False)
+    extracted = tmp_path / "extracted.json"
+    extracted.write_text(json.dumps({
+        "census_year": 1860,
+        "records": [{
+            "Dwelling Number": 41,
+            "Family Number": 41,
+            "Surname": "Family41",
+        }],
+    }))
+
+    metrics, rows = compare.compare(
+        str(extracted), str(workbook), "Bastrop", 1860, 2,
+    )
+
+    assert metrics["physical_page"] == 2
+    assert rows[0]["fields"]["Surname"]["match"] is True
 
 
 def test_row_field_match_rate_and_row_accuracy_diverge():

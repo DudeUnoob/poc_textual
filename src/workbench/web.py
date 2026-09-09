@@ -17,6 +17,7 @@ from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
+from census_schemas import SUPPORTED_YEARS
 from .db import Batch, Export, ExtractionRun, FieldCandidate, Page, SessionLocal, init_db
 from .progress import now_iso, run_snapshot, update_progress
 from .schema import get_schema
@@ -29,11 +30,15 @@ STATIC_DIR = __file__.replace("web.py", "static")
 DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
 
-def extraction_config(total_pages: int) -> dict:
+def extraction_config(total_pages: int, schema) -> dict:
     timestamp = now_iso()
+    has_calibrated_geometry = bool(schema.field_bounds)
     return {
-        "use_crops": True, "expected_lines": 30,
-        "strategy": "row_blocks", "n_blocks": 3, "parallelism": 3,
+        "use_crops": has_calibrated_geometry,
+        "expected_lines": schema.expected_lines,
+        "schedule_type": schema.schedule_type,
+        "strategy": "row_blocks" if has_calibrated_geometry else "adaptive_full_page",
+        "n_blocks": 3, "parallelism": 3,
         "progress": {
             "phase": "queued", "message": "Waiting for the local extraction worker",
             "total_pages": total_pages, "completed_pages": 0,
@@ -79,7 +84,7 @@ def render_row_crop(image_path: str, line: int, schema, field: str | None = None
         top = schema.data_top + (schema.data_bottom - schema.data_top) * (line - 1) / schema.expected_lines
         bottom = schema.data_top + (schema.data_bottom - schema.data_top) * line / schema.expected_lines
         padding = int(height * 0.01)
-        left, right = schema.field_bounds.get(field, (0.245, 0.775))
+        left, right = schema.field_bounds.get(field, schema.row_bounds)
         horizontal_padding = 0.012 if field else 0
         crop = image.crop((
             max(0, int(width * (left - horizontal_padding))),
@@ -117,7 +122,16 @@ def dashboard(request: Request):
                     else "No review items are waiting"
                 ),
             }
-        return TEMPLATES.TemplateResponse(request, "dashboard.html", {"batches": batches, "counts": counts, "summaries": summaries})
+        return TEMPLATES.TemplateResponse(
+            request,
+            "dashboard.html",
+            {
+                "batches": batches,
+                "counts": counts,
+                "summaries": summaries,
+                "supported_years": SUPPORTED_YEARS,
+            },
+        )
 
 
 @app.post("/batches")
@@ -125,12 +139,13 @@ def create_batch(
     request: Request,
     name: str = Form(...), county: str = Form(...), state: str = Form(...),
     census_year: int = Form(...), enumeration_district: str = Form(...),
+    schedule_type: str = Form("population"),
     source_reference: str | None = Form(None), ground_truth_path: str | None = Form(None),
     ground_truth_sheet: str | None = Form(None), ground_truth_page: str | None = Form(None),
     files: list[UploadFile] = File(...),
 ):
     try:
-        get_schema(census_year)
+        get_schema(census_year, schedule_type)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     try:
@@ -138,7 +153,8 @@ def create_batch(
     except ValueError:
         raise HTTPException(status_code=400, detail="Starting physical page must be a whole number when provided.")
     with SessionLocal() as session:
-        batch = Batch(name=name.strip(), county=county.strip(), state=state.strip(), census_year=census_year,
+        batch = Batch(name=name.strip(), county=county.strip(), state=state.strip(),
+                      census_year=census_year, schedule_type=schedule_type,
                       enumeration_district=enumeration_district.strip(), source_reference=source_reference or None,
                       ground_truth_path=ground_truth_path or None, ground_truth_sheet=ground_truth_sheet or None,
                       ground_truth_page=parsed_ground_truth_page)
@@ -208,7 +224,10 @@ def queue_run(batch_id: int):
         total_pages = sum(1 for page in batch.pages if page.kind == "census")
         run = ExtractionRun(
             batch_id=batch.id, model=DEFAULT_MODEL,
-            config=extraction_config(total_pages),
+            config=extraction_config(
+                total_pages,
+                get_schema(batch.census_year, batch.schedule_type),
+            ),
         )
         session.add(run)
         session.commit()
@@ -263,9 +282,15 @@ def switch_to_fast_run(run_id: int):
         total_pages = session.scalar(select(func.count(Page.id)).where(
             Page.batch_id == run.batch_id, Page.kind == "census"
         )) or 0
+        batch = session.get(Batch, run.batch_id)
+        if batch is None:
+            raise HTTPException(status_code=404, detail="Batch not found")
         replacement = ExtractionRun(
             batch_id=run.batch_id, model=DEFAULT_MODEL,
-            config=extraction_config(total_pages),
+            config=extraction_config(
+                total_pages,
+                get_schema(batch.census_year, batch.schedule_type),
+            ),
         )
         session.add(replacement)
         session.commit()
@@ -335,7 +360,7 @@ def full_image(page_id: int):
 def row_crop(page_id: int, line: int, field: str | None = None):
     with SessionLocal() as session:
         page = page_or_404(session, page_id)
-        schema = get_schema(page.batch.census_year)
+        schema = get_schema(page.batch.census_year, page.batch.schedule_type)
         if not 1 <= line <= schema.expected_lines:
             raise HTTPException(status_code=400, detail="Line outside page layout")
         return Response(render_row_crop(page.stored_path, line, schema, field), media_type="image/jpeg")

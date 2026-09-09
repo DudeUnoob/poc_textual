@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="hero"><span class="eyebrow">1950 census pilot</span><h1>Turn scan batches into review-ready records.</h1><p>Import pages, watch extraction progress, and resolve only the fields that need human judgment.</p></section>
+<section class="hero"><span class="eyebrow">1850–1950 census workbench</span><h1>Turn scan batches into review-ready records.</h1><p>Import pages, watch extraction progress, and resolve only the fields that need human judgment.</p></section>
 {% if batches %}<section class="workspace-section"><div class="section-heading"><div><h2>Your batches</h2><p class="muted">Open a batch to continue from its exact saved state.</p></div></div>
 <div class="cards batch-grid">{% for batch in batches %}{% set summary = summaries[batch.id] %}<a class="card batch-card" href="/batches/{{ batch.id }}"><div class="batch-card-head"><strong>{{ batch.name }}</strong>{% if summary.run_status %}<span class="status-dot status-{{ summary.run_status }}">{{ summary.run_status }}</span>{% endif %}</div><span>{{ batch.county }}, {{ batch.state }} · ED {{ batch.enumeration_district }}</span><div class="batch-stats"><span><strong>{{ summary.pages }}</strong> census pages</span><span><strong>{{ counts[batch.id] }}</strong> rows to review</span></div><span class="next-step">{{ summary.next_step }} <b aria-hidden="true">→</b></span></a>{% endfor %}</div></section>{% endif %}
 <details class="card import-panel" {% if not batches %}open{% endif %}><summary><span><strong>{% if batches %}Import another batch{% else %}Import your first scan batch{% endif %}</strong><small>Select a local folder of authorized census images.</small></span></summary><div class="import-body"><p class="muted">Filename order is only a hint. You will confirm page numbers and identify covers before extraction starts.</p>
@@ -8,7 +8,8 @@
     <label>Batch name<input name="name" required placeholder="Bastrop ED 11-1"></label>
     <label>County<input name="county" required value="Bastrop"></label>
     <label>State<input name="state" required value="Texas"></label>
-    <label>Census year<input name="census_year" type="number" required value="1950" min="1950" max="1950"></label>
+    <label>Census year<select name="census_year" required>{% for year in supported_years %}<option value="{{ year }}" {% if year == 1950 %}selected{% endif %}>{{ year }}</option>{% endfor %}</select></label>
+    <label>Schedule type<select name="schedule_type"><option value="population">Population</option><option value="slave">Slave schedule (1850/1860)</option></select></label>
     <label>Enumeration district<input name="enumeration_district" required placeholder="11-1"></label>
     <label>Source reference<input name="source_reference" placeholder="Authorized Ancestry export / collection ID"></label>
     <details class="advanced-fields"><summary>Optional ground-truth mapping</summary><div class="advanced-grid"><label>Workbook path<input name="ground_truth_path" placeholder="data/ground_truth/...xlsx"></label><label>Worksheet<input name="ground_truth_sheet" placeholder="Bastrop 11-1"></label><label>Starting physical page<input name="ground_truth_page" type="number" min="1" placeholder="Leave blank if unknown"></label></div></details>
