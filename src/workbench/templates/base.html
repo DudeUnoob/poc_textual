@@ -12,7 +12,7 @@
 <body>
   <header>
     <a class="brand" href="/">Census Review Workbench</a>
-    <span>1850–1950 · {{ 'shared review portal' if firebase_auth else 'local review ledger' }}</span>
+    <span>1850–1950 · {{ 'shared review portal' if supabase_auth else 'local review ledger' }}</span>
     <span class="account">
       {% if current_user %}
         <span>{{ current_user.email }}</span>
@@ -20,7 +20,7 @@
           {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
           <button type="submit" class="ghost">Sign out</button>
         </form>
-      {% elif firebase_auth %}
+      {% elif supabase_auth %}
         <a class="button" href="/login">Sign in</a>
       {% endif %}
     </span>

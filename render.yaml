@@ -1,0 +1,77 @@
+# Prepared for deployment from this branch. Review paid instance plans before Apply.
+services:
+  - type: web
+    name: census-workbench
+    runtime: docker
+    branch: codex/supabase-architecture
+    plan: starter
+    region: ohio
+    autoDeployTrigger: 'off'
+    dockerCommand: sh -c 'uvicorn workbench.web:app --host 0.0.0.0 --port ${PORT:-10000}'
+    healthCheckPath: /health
+    envVars:
+      - key: WORKBENCH_BACKEND
+        value: supabase
+      - key: SUPABASE_URL
+        value: https://ynsutdkbpzrgfetnrxax.supabase.co
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: census-media
+      - key: WORKBENCH_ALLOWED_DOMAINS
+        value: utexas.edu,eid.utexas.edu,my.utexas.edu
+      - key: WORKBENCH_ALLOWED_EMAILS
+        sync: false
+      - key: WORKBENCH_PUBLIC_ORIGIN
+        sync: false
+      - key: WORKBENCH_EXTRACTION_ENABLED
+        value: 'false'
+      - key: WORKBENCH_MAX_MODEL_CALLS_PER_RUN
+        value: '0'
+      - key: WORKBENCH_MAX_PAGES_PER_RUN
+        value: '10'
+      - key: GEMINI_API_KEY
+        sync: false
+  - type: worker
+    name: census-worker
+    runtime: docker
+    branch: codex/supabase-architecture
+    plan: starter
+    region: ohio
+    autoDeployTrigger: 'off'
+    dockerCommand: python -m workbench.worker
+    envVars:
+      - key: WORKBENCH_BACKEND
+        value: supabase
+      - key: SUPABASE_URL
+        fromService:
+          type: web
+          name: census-workbench
+          envVarKey: SUPABASE_URL
+      - key: SUPABASE_SECRET_KEY
+        fromService:
+          type: web
+          name: census-workbench
+          envVarKey: SUPABASE_SECRET_KEY
+      - key: SUPABASE_STORAGE_BUCKET
+        value: census-media
+      - key: WORKBENCH_ALLOWED_DOMAINS
+        value: utexas.edu,eid.utexas.edu,my.utexas.edu
+      - key: WORKBENCH_ALLOWED_EMAILS
+        fromService:
+          type: web
+          name: census-workbench
+          envVarKey: WORKBENCH_ALLOWED_EMAILS
+      - key: WORKBENCH_EXTRACTION_ENABLED
+        value: 'false'
+      - key: WORKBENCH_MAX_MODEL_CALLS_PER_RUN
+        value: '0'
+      - key: WORKBENCH_MAX_PAGES_PER_RUN
+        value: '10'
+      - key: GEMINI_API_KEY
+        fromService:
+          type: web
+          name: census-workbench
+          envVarKey: GEMINI_API_KEY

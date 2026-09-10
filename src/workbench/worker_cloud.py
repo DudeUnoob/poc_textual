@@ -1,4 +1,4 @@
-"""One-shot Firestore extraction worker.
+"""One-shot Supabase Postgres extraction worker.
 
 Provider calls and object downloads run outside repository transactions. Budget
 receipts make each observed provider operation idempotent, but provider billing
@@ -27,7 +27,7 @@ class StorageService(Protocol):
     def fetch_exact(self, object_name: str, generation: str) -> bytes: ...
 
 
-class FirebaseStorageService:
+class SupabaseStorageService:
     """Read immutable object bytes using a generation precondition."""
 
     def __init__(self, bucket) -> None:
@@ -316,30 +316,10 @@ def process_next_job(
     return False
 
 
-def firebase_services() -> tuple[CloudRepository, FirebaseStorageService]:
-    import firebase_admin
-    from firebase_admin import firestore as firebase_firestore
-    from firebase_admin import storage as firebase_storage
-    from .cloud.store import FirebaseStore
-    from .settings import firebase_project_id, firebase_storage_bucket
-
-    try:
-        app = firebase_admin.get_app()
-    except ValueError:
-        options = {
-            key: value
-            for key, value in {
-                "projectId": firebase_project_id(),
-                "storageBucket": firebase_storage_bucket(),
-            }.items()
-            if value
-        }
-        app = firebase_admin.initialize_app(options=options)
-    repository = CloudRepository(FirebaseStore(firebase_firestore.client(app=app)))
-    storage = FirebaseStorageService(
-        firebase_storage.bucket(firebase_storage_bucket() or None, app=app)
-    )
-    return repository, storage
+def supabase_services() -> tuple[CloudRepository, SupabaseStorageService]:
+    from .cloud.api import get_repository
+    from .cloud.supabase_storage import private_bucket
+    return get_repository(), SupabaseStorageService(private_bucket())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -353,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.job_id:
         parser.error("job_id is required (argument or WORKBENCH_JOB_ID)")
-    repo, storage = firebase_services()
+    repo, storage = supabase_services()
     processed = process_next_job(
         repo, args.worker_id, storage=storage, job_id=args.job_id
     )

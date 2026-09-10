@@ -1,4 +1,4 @@
-"""Small transaction adapter: the same domain operations run against Firestore and tests."""
+"""Small transaction adapter: the same domain operations run against PostgreSQL and tests."""
 from copy import deepcopy
 from threading import RLock
 
@@ -31,32 +31,64 @@ class MemoryStore:
             return result
 
 
-class FirebaseStore:
-    def __init__(self, db):
-        self.db = db
+class StoreContentionError(RuntimeError):
+    """The caller may retry its original operation ID after contention subsides."""
+
+
+class SupabaseStore:
+    """Optimistic serializable transactions over a service-role-only PostgreSQL RPC.
+
+    Each successful write advances a global version under a row lock. Reads may
+    happen over several HTTP requests, but no result or domain error is accepted
+    unless that version is still unchanged. This conservative scheme prevents
+    write skew and phantoms across independent documents at the five-editor scale.
+    Network failures are surfaced, never blindly replayed after an uncertain commit;
+    application operation receipts make a caller's subsequent retry safe.
+    """
+    def __init__(self, client, max_attempts=8):
+        if max_attempts < 1:
+            raise ValueError('max_attempts must be positive')
+        self.client = client
+        self.max_attempts = max_attempts
+
+    def _rpc(self, name, params=None):
+        return self.client.rpc(name, params or {}).execute().data
 
     def get(self, path):
-        return self.db.document(path).get().to_dict()
+        return self._rpc('workbench_read', {'document_path': path})
 
     def list(self, collection):
-        return [dict(s.to_dict(), id=s.id) for s in self.db.collection(collection).stream()]
+        return self._rpc('workbench_list', {'collection_path': collection}) or []
 
     def atomic(self, callback):
-        from google.cloud import firestore
-        db = self.db
-        @firestore.transactional
-        def run(transaction):
-            # Stage writes so every Firestore read precedes every write.
-            writes = {}
+        import random
+        import time
+        store = self
+        for attempt in range(self.max_attempts):
+            version = self._rpc('workbench_version')
+            writes, reads = {}, {}
             class Transaction:
                 def get(self, path):
                     if path in writes:
                         return deepcopy(writes[path])
-                    return db.document(path).get(transaction=transaction).to_dict()
+                    if path not in reads:
+                        reads[path] = store.get(path)
+                    return deepcopy(reads[path])
                 def set(self, path, value):
                     writes[path] = deepcopy(value)
-            result = callback(Transaction())
-            for path, value in writes.items():
-                transaction.set(db.document(path), value)
-            return result
-        return run(db.transaction())
+            try:
+                result = callback(Transaction())
+            except Exception:
+                # A domain error from an inconsistent view must be retried too.
+                if self._rpc('workbench_version') == version:
+                    raise
+            else:
+                committed = self._rpc('workbench_commit', {
+                    'expected_version': version,
+                    'writes': [{'path': path, 'value': value} for path, value in writes.items()],
+                })
+                if committed:
+                    return result
+            if attempt + 1 < self.max_attempts:
+                time.sleep(random.uniform(0.005, min(0.2, 0.01 * (2 ** attempt))))
+        raise StoreContentionError('Concurrent updates prevented saving; retry the same operation ID')

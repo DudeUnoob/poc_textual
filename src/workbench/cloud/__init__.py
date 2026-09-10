@@ -1,10 +1,10 @@
 from .repository import CloudError, CloudRepository, Principal
-from .store import FirebaseStore, MemoryStore
+from .store import SupabaseStore, MemoryStore
 
 __all__ = [
     'CloudError',
     'CloudRepository',
-    'FirebaseStore',
+    'SupabaseStore',
     'MemoryStore',
     'Principal',
 ]

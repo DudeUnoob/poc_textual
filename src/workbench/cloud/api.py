@@ -1,6 +1,6 @@
-"""Backend-only API for shared Firestore state.
+"""Backend-only API for shared Supabase Postgres state.
 
-Browser code never talks to Firestore or Storage directly. Every mutation
+Browser code never talks to Supabase Postgres or Storage directly. Every mutation
 crosses this boundary with identity, revision, lease, and operation metadata.
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Resp
 from pydantic import BaseModel, Field
 
 from .repository import CloudError, CloudRepository, Principal, source_identity_id
-from .store import FirebaseStore
+from .store import SupabaseStore
 
 router = APIRouter(prefix="/api/shared", tags=["shared"])
 
@@ -98,18 +98,14 @@ class AssignmentCommand(Command):
 
 
 def get_repository() -> CloudRepository:
-    from firebase_admin import firestore as firebase_firestore
-    from workbench.auth import init_firebase
-
-    init_firebase()
-    return CloudRepository(FirebaseStore(firebase_firestore.client()))
+    from workbench.supabase_client import create_admin_client
+    return CloudRepository(SupabaseStore(create_admin_client()))
 
 
 def get_storage_service():
-    from firebase_admin import storage as firebase_storage
     from .storage import StorageService
-
-    return StorageService(firebase_storage.bucket())
+    from .supabase_storage import private_bucket
+    return StorageService(private_bucket())
 
 
 def get_actor(request: Request) -> Principal:

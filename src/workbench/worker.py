@@ -201,9 +201,9 @@ def process_next_run() -> bool:
 
 
 def main() -> None:
-    from .settings import is_firebase
+    from .settings import is_supabase
 
-    if is_firebase():
+    if is_supabase():
         from .worker_cloud import main as cloud_main
         cloud_main()
         return

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministically migrate a local workbench SQLite database to Firestore."""
+"""Deterministically migrate a local workbench SQLite database to Supabase."""
 from __future__ import annotations
 
 import argparse
@@ -144,6 +144,64 @@ def _add_relationship_lists(documents: dict[str, list[dict[str, Any]]]) -> None:
                     document[key] = sorted(value)
 
 
+def _adapt_shared_documents(documents: dict[str, list[dict[str, Any]]]) -> None:
+    """Preserve legacy evidence and materialize the shared portal's review rows."""
+    from collections import defaultdict
+    from workbench.cloud.repository import digest, source_identity_id
+
+    batches = {item['id']: item for item in documents['batches']}
+    candidates = defaultdict(list)
+    decisions = defaultdict(list)
+    for item in documents['candidates']:
+        candidates[item['page_id']].append(item)
+    for item in documents['decisions']:
+        decisions[item['candidate_id']].append(item)
+    documents['rows'], documents['sources'] = [], []
+    for batch in batches.values():
+        batch.update(year=batch['census_year'], district=batch['enumeration_district'],
+                     sheet_name=batch.get('ground_truth_sheet'), status='open', revision=0,
+                     legacy_created_at=batch['created_at'],
+                     created_at=datetime.fromisoformat(batch['created_at']).timestamp())
+    for page in documents['pages']:
+        batch = batches[page['batch_id']]
+        # A local filename is not a verified Ancestry image ID. Keep that distinction.
+        source = {'image_id': 'legacy-local:' + page['id'], 'year': batch['year'],
+                  'schedule_type': batch['schedule_type'], 'district': batch['district']}
+        source_id = source_identity_id(source)
+        page.update(source=source, source_id=source_id, source_identity_verified=False,
+                    storage_status='pending', revision=0, row_ids=[], complete=False)
+        documents['sources'].append({'id': source_id, 'identity': source,
+            'version_ids': [page['id']], 'reconciliation_required': False})
+        available = candidates[page['id']]
+        reviewed_runs = [c['run_id'] for c in available if decisions[c['id']]]
+        selected_run = min(reviewed_runs) if reviewed_runs else max((c['run_id'] for c in available), default=None)
+        by_line = defaultdict(dict)
+        for candidate in available:
+            if candidate['run_id'] == selected_run and page.get('kind') == 'census':
+                line = by_line[candidate['line_number']]
+                if candidate['field_name'] in line:
+                    raise MigrationError('Ambiguous duplicate field in selected extraction run')
+                line[candidate['field_name']] = candidate
+        for line_number, fields in sorted(by_line.items()):
+            row_id = digest([page['id'], str(line_number)])
+            original = {field: c['normalized_value'] for field, c in fields.items()}
+            values, states = dict(original), {field: 'unresolved' for field in fields}
+            for field, candidate in fields.items():
+                history = sorted(decisions[candidate['id']], key=lambda d: (d['created_at'], d['id']))
+                final = [d for d in history if d['action'] in {'confirmed', 'corrected', 'unreadable'}]
+                if final:
+                    values[field] = final[-1]['value']
+                    states[field] = 'unreadable' if final[-1]['action'] == 'unreadable' else ('blank' if values[field] in (None, '') else 'value')
+            documents['rows'].append({'id': row_id, 'page_id': page['id'], 'row_key': str(line_number),
+                'run_id': selected_run, 'candidate_ids': [c['id'] for c in fields.values()],
+                'original_values': original, 'values': values,
+                'original_states': {field: 'unresolved' for field in fields}, 'reading_states': states,
+                'revision': 0, 'primary_complete': False, 'qa_selected': int(row_id[:8], 16) % 10 == 0,
+                'qa_complete': False, 'finalized': False, 'lease': None,
+                'migration_review_required': True})
+            page['row_ids'].append(row_id)
+
+
 def _referenced_files(
     documents: dict[str, list[dict[str, Any]]], storage_root: Path,
 ) -> list[dict[str, Any]]:
@@ -199,6 +257,7 @@ def inventory_source(database: str | Path, storage_root: str | Path) -> dict[str
         raise MigrationError("Source database changed while inventory was being created")
 
     _add_relationship_lists(documents)
+    _adapt_shared_documents(documents)
     files = _referenced_files(documents, Path(storage_root).expanduser().resolve())
     source_fingerprint = hashlib.sha256(json.dumps(
         {"database": before, "files": [(item["source_path"], item["sha256"]) for item in files]},
@@ -243,7 +302,7 @@ def _store_set(store: Store, path: str, value: dict[str, Any]) -> None:
 
 def _manifest_path(migration_id: str) -> str:
     if not migration_id or "/" in migration_id:
-        raise ValueError("migration_id must be a non-empty Firestore-safe string")
+        raise ValueError("migration_id must be a non-empty Supabase-safe string")
     return f"migration_manifests/{migration_id}"
 
 
@@ -262,11 +321,18 @@ def verify_migration(
     for collection, identifiers in destination_ids.items():
         if len(identifiers) != int(manifest["counts"][collection]):
             raise MigrationError(f"Count mismatch for {collection}")
+        fetched = {d["id"]: d for d in store.list(collection)} if hasattr(store, "list") else None
         for identifier in identifiers:
-            document = store.get(f"{collection}/{identifier}")
+            document = fetched.get(identifier) if fetched is not None else store.get(f"{collection}/{identifier}")
             if document is None:
                 raise MigrationError(f"Destination document is missing: {collection}/{identifier}")
             documents[f"{collection}/{identifier}"] = document
+
+    for collection, expected in manifest.get('collection_sha256', {}).items():
+        values = [documents[f'{collection}/{identifier}'] for identifier in destination_ids[collection]]
+        actual = hashlib.sha256(json.dumps(sorted(values, key=lambda d: d['id']), sort_keys=True).encode()).hexdigest()
+        if actual != expected:
+            raise MigrationError(f'Document content mismatch for {collection}')
 
     all_ids = {identifier for values in destination_ids.values() for identifier in values}
     for collection, owners in manifest["relationships"].items():
@@ -293,7 +359,7 @@ def verify_migration(
     return {"verified": True, "counts": dict(manifest["counts"])}
 
 
-def migrate_to_firestore(
+def migrate_to_supabase(
     database: str | Path,
     storage_root: str | Path,
     migration_id: str,
@@ -328,8 +394,17 @@ def migrate_to_firestore(
             return existing
         raise MigrationConflict(f"Migration ID {migration_id!r} already exists with status {existing.get('status')}")
 
+    # Refuse to overwrite shared work from an earlier import or an active portal.
+    for collection, identifiers in inventory['destination_ids'].items():
+        if hasattr(store, 'list'):
+            occupied = {d['id'] for d in store.list(collection)}
+            if occupied.intersection(identifiers):
+                raise MigrationConflict(f'Destination already contains imported IDs in {collection}')
+        elif any(store.get(f'{collection}/{identifier}') is not None for identifier in identifiers):
+            raise MigrationConflict(f'Destination already contains imported IDs in {collection}')
+
     manifest = {
-        "version": 1,
+        "version": 2,
         "migration_id": migration_id,
         **_public_inventory(inventory),
         "status": "pending",
@@ -340,8 +415,12 @@ def migrate_to_firestore(
     _store_set(store, path, manifest)
     try:
         copied_files = []
+        copied_by_key = {}
         for source_file in inventory["source_files"]:
-            result = dict(copy_object(Path(source_file["source_path"]), source_file["destination_key"], source_file["sha256"]))
+            object_key = source_file["destination_key"]
+            if object_key not in copied_by_key:
+                copied_by_key[object_key] = dict(copy_object(Path(source_file["source_path"]), object_key, source_file["sha256"]))
+            result = copied_by_key[object_key]
             returned_checksum = result.get("sha256") or result.get("checksum")
             generation = result.get("generation")
             if returned_checksum != source_file["sha256"] or generation in (None, ""):
@@ -364,9 +443,29 @@ def migrate_to_firestore(
                 "sha256": source_file["sha256"],
                 "generation": source_file["copied"]["generation"],
             })
+        import mimetypes
+        for source_file in copied_files:
+            if source_file['owner_collection'] == 'pages' and source_file['field'] == 'stored_path':
+                page = documents_by_id[('pages', source_file['owner_id'])]
+                page.update(object_name=source_file['destination_key'], checksum=source_file['sha256'],
+                            generation=source_file['copied']['generation'], storage_status='ready',
+                            content_type=mimetypes.guess_type(source_file['source_path'])[0] or 'application/octet-stream',
+                            size=source_file['size'])
         for collection, values in inventory["documents"].items():
-            for document in values:
-                _store_set(store, f"{collection}/{document['id']}", document)
+            for offset in range(0, len(values), 100):
+                chunk = values[offset:offset + 100]
+                if hasattr(store, 'atomic'):
+                    def write_chunk(tx, chunk=chunk, collection=collection):
+                        for document in chunk:
+                            tx.set(f"{collection}/{document['id']}", document)
+                    store.atomic(write_chunk)
+                else:
+                    for document in chunk:
+                        _store_set(store, f"{collection}/{document['id']}", document)
+        manifest['collection_sha256'] = {
+            collection: hashlib.sha256(json.dumps(sorted(values, key=lambda d: d['id']), sort_keys=True).encode()).hexdigest()
+            for collection, values in inventory['documents'].items()
+        }
         verify_migration(store, manifest)
         manifest = {**manifest, "status": "complete", "completed_at": _json_value(clock())}
         _store_set(store, path, manifest)
@@ -382,22 +481,25 @@ def migrate_to_firestore(
         raise
 
 
-def _firebase_dependencies() -> tuple[Store, StorageCopy]:
-    import firebase_admin
-    from firebase_admin import firestore, storage
-    from workbench.cloud.store import FirebaseStore
+def _supabase_dependencies() -> tuple[Store, StorageCopy]:
+    import os
+    from workbench.supabase_client import create_admin_client
+    from workbench.cloud.store import SupabaseStore
 
-    app = firebase_admin.initialize_app()
-    destination_store = FirebaseStore(firestore.client(app=app))
-    bucket = storage.bucket(app=app)
+    client = create_admin_client()
+    destination_store = SupabaseStore(client)
+    bucket = client.storage.from_(os.environ.get("SUPABASE_STORAGE_BUCKET", "census-media"))
 
     def copy_object(source: Path, destination_key: str, checksum: str) -> Mapping[str, Any]:
-        blob = bucket.blob(destination_key)
-        blob.upload_from_filename(str(source), if_generation_match=0)
-        blob.reload()
-        blob.metadata = {**(blob.metadata or {}), "sha256": checksum}
-        blob.patch(if_metageneration_match=blob.metageneration)
-        return {"sha256": checksum, "generation": str(blob.generation)}
+        payload = source.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != checksum:
+            raise MigrationError("Source object changed during migration")
+        bucket.upload(destination_key, payload, {"upsert": "false", "content-type": "application/octet-stream"})
+        if hashlib.sha256(bucket.download(destination_key)).hexdigest() != checksum:
+            raise MigrationError("Uploaded object checksum does not match")
+        # Keys are immutable/content-addressed. Supabase has no GCS generation;
+        # the checksum is the portable immutable version identifier.
+        return {"sha256": checksum, "generation": str(int(checksum, 16))}
 
     return destination_store, copy_object
 
@@ -412,8 +514,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print(json.dumps(_public_inventory(inventory_source(args.database, args.storage_root)), indent=2, sort_keys=True))
         return 0
-    store, copy_object = _firebase_dependencies()
-    result = migrate_to_firestore(args.database, args.storage_root, args.migration_id, store, copy_object)
+    store, copy_object = _supabase_dependencies()
+    result = migrate_to_supabase(args.database, args.storage_root, args.migration_id, store, copy_object)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

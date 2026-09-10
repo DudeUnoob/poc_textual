@@ -1,75 +1,128 @@
-"""Create a verified recovery set in an independently administered project.
+"""Verified independent Supabase recovery set; run every six hours as operator.
 
-Run as a dedicated backup identity every six hours, never as the web service.
-No COMPLETE marker is written unless database export, all immutable object
-versions and UID inventory have been verified. Passwords are reset on restore.
+Requires pg_dump and a direct/session PostgreSQL URL. The database dump contains
+Auth identity state and private application documents in one consistent snapshot.
+Storage bytes are separately copied because PostgreSQL backups exclude them.
+Never give the web service recovery-project credentials.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+import os
+import subprocess
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
+from uuid import uuid4
 
 
-def create_backup(project: str, source_bucket: str, recovery_project: str, recovery_bucket: str) -> dict:
-    if project == recovery_project or source_bucket == recovery_bucket:
-        raise ValueError('Recovery must use a different project and bucket')
-    import firebase_admin
-    from firebase_admin import auth
-    from google.cloud import storage
-    from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
-    app = firebase_admin.initialize_app(options={'projectId': project}, name='recovery-export')
-    source = storage.Client(project=project).get_bucket(source_bucket)
-    destination = storage.Client(project=recovery_project).get_bucket(recovery_bucket)
-    if source.project_number == destination.project_number:
-        raise ValueError('Recovery bucket belongs to the source project')
-    snapshot = (datetime.now(timezone.utc) - timedelta(minutes=1)).replace(second=0, microsecond=0)
-    prefix = 'recovery/' + snapshot.strftime('%Y%m%dT%H%M%SZ')
-    # A fixed PITR timestamp is essential: an ordinary export is not consistent.
-    export = FirestoreAdminClient().export_documents(request={
-        'name': f'projects/{project}/databases/(default)',
-        'output_uri_prefix': f'gs://{recovery_bucket}/{prefix}/firestore',
-        'snapshot_time': snapshot,
-    }).result(timeout=18000)
+
+def storage_objects(bucket, prefix=''):
+    """Paginate every directory; folders have no object id."""
+    offset = 0
+    while True:
+        entries = bucket.list(prefix, {'limit': 1000, 'offset': offset, 'sortBy': {'column': 'name', 'order': 'asc'}})
+        for entry in entries:
+            key = '/'.join(part for part in (prefix, entry['name']) if part)
+            if entry.get('id') is None:
+                yield from storage_objects(bucket, key)
+            else:
+                yield key
+        if len(entries) < 1000:
+            break
+        offset += len(entries)
+
+
+def verified_upload(bucket, key: str, payload: bytes) -> str:
+    digest = sha256(payload)
+    bucket.upload(key, payload, {'upsert': 'false', 'content-type': 'application/octet-stream'})
+    if sha256(bucket.download(key)) != digest:
+        raise RuntimeError(f'Backup verification failed for {key}')
+    return digest
+
+
+def database_dump(database_url: str, output: Path) -> None:
+    # Keep credentials out of process arguments and command output. pg_dump uses
+    # a transactionally consistent snapshot across all selected schemas.
+    environment = dict(os.environ, PGDATABASE=database_url)
+    result = subprocess.run([
+        'pg_dump', '--format=custom', '--no-owner', '--no-acl',
+        '--schema=workbench_private', '--schema=public', '--schema=auth',
+        '--file', str(output),
+    ], env=environment, capture_output=True, check=False)
+    if result.returncode:
+        raise RuntimeError('pg_dump failed; check operator connectivity, PostgreSQL version and privileges')
+    if not output.is_file() or output.stat().st_size == 0:
+        raise RuntimeError('pg_dump produced no backup')
+
+
+def create_backup(source_url: str, source_bucket: str, recovery_url: str, recovery_bucket: str,
+                  *, source_client=None, recovery_client=None, database_url: str | None = None) -> dict:
+    source_host = urlparse(source_url).hostname
+    recovery_host = urlparse(recovery_url).hostname
+    if not source_host or not recovery_host or source_host == recovery_host:
+        raise ValueError('Recovery must use a different Supabase project')
+    database_url = database_url or os.environ['SUPABASE_DB_URL']
+    if source_client is None:
+        from supabase import create_client
+        source_client = create_client(source_url, os.environ['SUPABASE_SECRET_KEY'])
+    if recovery_client is None:
+        from supabase import create_client
+        recovery_client = create_client(recovery_url, os.environ['SUPABASE_RECOVERY_SECRET_KEY'])
+    source = source_client.storage.from_(source_bucket)
+    destination = recovery_client.storage.from_(recovery_bucket)
+    started = datetime.now(timezone.utc)
+    prefix = 'recovery/' + started.strftime('%Y%m%dT%H%M%SZ') + '-' + uuid4().hex
+    with tempfile.TemporaryDirectory(prefix='census-backup-') as temporary:
+        output = Path(temporary) / 'database.dump'
+        database_dump(database_url, output)
+        dump_hash = verified_upload(destination, f'{prefix}/database.dump', output.read_bytes())
     objects = []
-    # Include every generation: older releases may reference a superseded version.
-    for blob in source.list_blobs(versions=True):
-        target_name = f'{prefix}/objects/{blob.generation}/{blob.name}'
-        copied = source.copy_blob(blob, destination, target_name,
-                                  source_generation=blob.generation,
-                                  if_generation_match=0)
-        copied.reload()
-        if copied.crc32c != blob.crc32c or copied.size != blob.size:
-            raise RuntimeError(f'Backup verification failed for object {blob.name}')
-        objects.append({'source': blob.name, 'source_generation': str(blob.generation),
-                        'target': target_name, 'generation': str(copied.generation),
-                        'crc32c': copied.crc32c, 'size': copied.size})
-    identities = [{'uid': u.uid, 'email': u.email, 'email_verified': u.email_verified,
-                   'disabled': u.disabled} for u in auth.list_users(app=app).iterate_all()]
-    uid_data = json.dumps(identities, sort_keys=True).encode()
-    identity_blob = destination.blob(f'{prefix}/identities.json')
-    identity_blob.upload_from_string(uid_data, content_type='application/json', if_generation_match=0)
-    if identity_blob.download_as_bytes() != uid_data:
-        raise RuntimeError('Identity inventory verification failed')
-    manifest = {'version': 1, 'status': 'COMPLETE', 'source_project': project,
-                'snapshot_time': snapshot.isoformat(), 'firestore_export': export.output_uri_prefix,
-                'objects': objects, 'identities': identity_blob.name,
-                'identities_sha256': hashlib.sha256(uid_data).hexdigest(),
-                'restore_access': 'closed', 'password_policy': 'reset-required',
+    # Application objects must stay immutable and must not be deleted while a
+    # snapshot is running. Additional post-snapshot objects are harmless.
+    for key in storage_objects(source):
+        payload = source.download(key)
+        target = f'{prefix}/objects/{key}'
+        checksum = verified_upload(destination, target, payload)
+        objects.append({'source': key, 'target': target, 'sha256': checksum, 'size': len(payload)})
+    # This inventory assists operators; auth.* inside database.dump is the
+    # authoritative point-in-time UID/password state, not this later list.
+    identities = []
+    page = 1
+    while True:
+        users = source_client.auth.admin.list_users(page=page, per_page=1000)
+        identities.extend({'uid': user.id, 'email': user.email,
+                           'email_verified': bool(user.email_confirmed_at)} for user in users)
+        if len(users) < 1000:
+            break
+        page += 1
+    identities_data = json.dumps(identities, sort_keys=True).encode()
+    identities_hash = verified_upload(destination, f'{prefix}/identities.json', identities_data)
+    manifest = {'version': 2, 'provider': 'supabase', 'status': 'COMPLETE',
+                'source_project': source_host, 'source_bucket': source_bucket,
+                'snapshot_started_at': started.isoformat(),
+                'database_export': f'{prefix}/database.dump', 'database_sha256': dump_hash,
+                'database_schemas': ['workbench_private', 'public', 'auth'],
+                'objects': objects, 'identities': f'{prefix}/identities.json',
+                'identities_sha256': identities_hash, 'restore_access': 'closed',
+                'password_policy': 'reset-required',
                 'completed_at': datetime.now(timezone.utc).isoformat()}
-    destination.blob(f'{prefix}/COMPLETE.json').upload_from_string(
-        json.dumps(manifest, sort_keys=True), content_type='application/json', if_generation_match=0)
+    verified_upload(destination, f'{prefix}/COMPLETE.json', json.dumps(manifest, sort_keys=True).encode())
     return {'prefix': prefix, 'objects': len(objects), 'identities': len(identities)}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for arg in ('project', 'source-bucket', 'recovery-project', 'recovery-bucket'):
-        parser.add_argument('--' + arg, required=True)
-    args = parser.parse_args()
-    print(json.dumps(create_backup(args.project, args.source_bucket, args.recovery_project, args.recovery_bucket)))
+    parser.parse_args()
+    print(json.dumps(create_backup(os.environ['SUPABASE_URL'],
+        os.environ.get('SUPABASE_STORAGE_BUCKET', 'census-media'),
+        os.environ['SUPABASE_RECOVERY_URL'], os.environ['WORKBENCH_RECOVERY_BUCKET'])))
 
 
 if __name__ == '__main__':

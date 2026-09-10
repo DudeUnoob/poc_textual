@@ -1,4 +1,4 @@
-"""Server-rendered Firestore portal used when WORKBENCH_BACKEND=firebase."""
+"""Server-rendered Supabase Postgres portal used when WORKBENCH_BACKEND=supabase."""
 from __future__ import annotations
 
 import json

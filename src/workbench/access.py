@@ -1,7 +1,7 @@
-"""Request identity for local and Firebase deployments.
+"""Request identity for local and Supabase deployments.
 
 Local mode keeps the existing unauthenticated workbench so unit tests and
-single-operator use stay unchanged. Firebase mode requires a verified
+single-operator use stay unchanged. Supabase mode requires a verified
 university session on every protected route, including media and SSE.
 """
 from __future__ import annotations
@@ -23,10 +23,10 @@ class LocalPrincipal:
     role: str = "admin"
 
 
-def firebase_mode() -> bool:
-    from .settings import is_firebase
+def supabase_mode() -> bool:
+    from .settings import is_supabase
 
-    return is_firebase()
+    return is_supabase()
 
 
 def _http_error(exc) -> HTTPException:
@@ -35,20 +35,15 @@ def _http_error(exc) -> HTTPException:
 
 def attach_principal(request: Request) -> None:
     request.state.principal = None
-    if not firebase_mode():
+    if not supabase_mode():
         return
     from .auth import AuthError, principal_from_claims, verify_request_session
 
     try:
         claims = verify_request_session(request)
         principal = principal_from_claims(claims)
-        from firebase_admin import firestore as firebase_firestore
-        from .cloud.repository import CloudRepository
-        from .cloud.store import FirebaseStore
-
-        request.state.principal = CloudRepository(
-            FirebaseStore(firebase_firestore.client())
-        ).ensure_member(principal.uid, principal.email)
+        from .cloud.api import get_repository
+        request.state.principal = get_repository().ensure_member(principal.uid, principal.email)
     except AuthError:
         request.state.principal = None
     except Exception:
@@ -71,7 +66,7 @@ async def submitted_csrf_token(request: Request) -> str | None:
 
 
 def enforce(request: Request, csrf_token: str | None = None) -> Response | None:
-    if not firebase_mode():
+    if not supabase_mode():
         return None
     path = request.url.path
     if path.startswith(PUBLIC_PREFIXES) or path == "/health" or path == "/favicon.ico":
@@ -118,14 +113,14 @@ def require_principal(request: Request):
     principal = current_principal(request)
     if principal is not None:
         return principal
-    if firebase_mode():
+    if supabase_mode():
         raise HTTPException(status_code=401, detail="Authentication required")
     return LocalPrincipal()
 
 
 def require_admin(request: Request):
     principal = require_principal(request)
-    if firebase_mode() and getattr(principal, "role", None) != "admin":
+    if supabase_mode() and getattr(principal, "role", None) != "admin":
         raise HTTPException(status_code=403, detail="Administrator required")
     return principal
 
@@ -141,12 +136,12 @@ def reviewer_identity(request: Request, submitted: str | None) -> str:
 
 
 def template_context(request: Request, extra: dict | None = None) -> dict:
-    from .settings import allowed_domains, firebase_web_config
+    from .settings import allowed_domains, supabase_web_config
 
     context = dict(extra or {})
-    config = firebase_web_config()
+    config = supabase_web_config()
     token = ""
-    if firebase_mode():
+    if supabase_mode():
         from .auth import CSRF_COOKIE_NAME, new_csrf_token
 
         token = (
@@ -158,21 +153,19 @@ def template_context(request: Request, extra: dict | None = None) -> dict:
             token = new_csrf_token()
             request.state.issued_csrf = token
     context.setdefault("current_user", current_principal(request))
-    context.setdefault("firebase_mode", firebase_mode())
-    context.setdefault("firebase_auth", firebase_mode())
+    context.setdefault("supabase_mode", supabase_mode())
+    context.setdefault("supabase_auth", supabase_mode())
     context.setdefault("csrf_token", token)
-    context.setdefault("firebase_config", config)
-    context.setdefault("firebase_api_key", config.get("apiKey", ""))
-    context.setdefault("firebase_auth_domain", config.get("authDomain", ""))
-    context.setdefault("firebase_project_id", config.get("projectId", ""))
-    context.setdefault("firebase_app_id", config.get("appId", ""))
+    context.setdefault("supabase_config", config)
+    context.setdefault("supabase_url", config.get("url", ""))
+    context.setdefault("supabase_publishable_key", config.get("publishableKey", ""))
     context.setdefault("allowed_domains", list(allowed_domains()))
     return context
 
 
 def attach_response_cookies(request: Request, response: Response) -> Response:
     token = getattr(request.state, "issued_csrf", None)
-    if token and firebase_mode():
+    if token and supabase_mode():
         from .auth import attach_csrf_cookie
 
         attach_csrf_cookie(response, token)

@@ -203,3 +203,11 @@ PYTHONPATH=src python -m workbench.calibrate \
 Damodar — SDE Intern, UT Austin IRP  
 Supervisor: Mia (Textual Database / infra)  
 Project Lead: Jaden
+
+
+## Shared multi-user deployment
+
+Set `WORKBENCH_BACKEND=supabase` for Supabase Auth, transactional PostgreSQL
+review state and private Storage. Follow [deployment, migration and recovery](docs/DEPLOYMENT.md)
+and the [architecture decisions](SUPABASE_ROADMAP.md). Local mode is isolated
+development; shared deployment requires verified university accounts and server secrets.

@@ -1,137 +1,102 @@
-from __future__ import annotations
-
-import sys
-from datetime import datetime, timedelta, timezone
+"""Recovery checks exercise Supabase copies and real manifest integrity rules."""
+import json
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
-from types import ModuleType
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-_SPEC = spec_from_file_location('recovery_backup', ROOT / 'scripts' / 'recovery_backup.py')
-assert _SPEC is not None and _SPEC.loader is not None
-recovery_backup = module_from_spec(_SPEC)
-_SPEC.loader.exec_module(recovery_backup)
-
-FIXED_NOW = datetime(2026, 9, 8, 21, 0, 30, tzinfo=timezone.utc)
-SNAPSHOT = (FIXED_NOW - timedelta(minutes=1)).replace(second=0, microsecond=0)
+SPEC = spec_from_file_location('recovery_backup', Path(__file__).parents[1] / 'scripts/recovery_backup.py')
+backup = module_from_spec(SPEC)
+SPEC.loader.exec_module(backup)
 
 
-class _FrozenDateTime(datetime):
-    @classmethod
-    def now(cls, tz=None):
-        return FIXED_NOW
+class Bucket:
+    def __init__(self, objects=None, corrupt=False):
+        self.objects = dict(objects or {})
+        self.corrupt = corrupt
+
+    def upload(self, key, payload, options):
+        assert options['upsert'] == 'false'
+        assert key not in self.objects
+        self.objects[key] = payload
+
+    def download(self, key):
+        return b'corrupted' if self.corrupt else self.objects[key]
+
+    def list(self, prefix, options):
+        return [{'name': 'page.jpg', 'id': 'object-id'}] if not prefix else []
 
 
-def _blob_store() -> tuple[MagicMock, dict[str, MagicMock]]:
-    created: dict[str, MagicMock] = {}
-
-    def blob(name: str) -> MagicMock:
-        if name not in created:
-            item = MagicMock()
-            item.name = name
-            stored: dict[str, bytes] = {}
-
-            def upload(data, **_kwargs):
-                stored['data'] = data if isinstance(data, bytes) else data.encode()
-
-            item.upload_from_string.side_effect = upload
-            item.download_as_bytes.side_effect = lambda: stored['data']
-            created[name] = item
-        return created[name]
-
-    destination = MagicMock()
-    destination.project_number = 2
-    destination.blob.side_effect = blob
-    return destination, created
-
-
-def _source_blob(*, crc32c: str = 'abc', size: int = 4) -> MagicMock:
-    blob = MagicMock()
-    blob.name = 'originals/page.jpg'
-    blob.generation = 11
-    blob.crc32c = crc32c
-    blob.size = size
-    return blob
-
-
-def _stack(*, checksum_ok: bool = True):
+def run_backup(monkeypatch, destination):
     source = MagicMock()
-    source.project_number = 1
-    original = _source_blob()
-    source.list_blobs.return_value = [original]
-    copied = MagicMock()
-    copied.crc32c = original.crc32c if checksum_ok else 'mismatch'
-    copied.size = original.size
-    copied.generation = 99
-    source.copy_blob.return_value = copied
-    destination, blobs = _blob_store()
-
-    def client(project=None):
-        handle = MagicMock()
-        handle.get_bucket.return_value = source if project == 'src-proj' else destination
-        return handle
-
-    export = MagicMock()
-    export.output_uri_prefix = 'gs://dst-bucket/recovery/x/firestore'
-    admin_client = MagicMock()
-    admin_client.export_documents.return_value.result.return_value = export
-    user = MagicMock(uid='u1', email='admin@utexas.edu', email_verified=True, disabled=False)
-    return {
-        'client': client,
-        'admin_client': admin_client,
-        'export_documents': admin_client.export_documents,
-        'blobs': blobs,
-        'users': [user],
-    }
+    source.storage.from_.return_value = Bucket({'page.jpg': b'scan'})
+    source.auth.admin.list_users.return_value = [SimpleNamespace(
+        id='u1', email='admin@utexas.edu', email_confirmed_at='2026-09-09')]
+    recovery = MagicMock()
+    recovery.storage.from_.return_value = destination
+    monkeypatch.setattr(backup, 'database_dump', lambda url, output: output.write_bytes(b'consistent database dump'))
+    return backup.create_backup('https://source.supabase.co', 'census-media',
+        'https://recovery.supabase.co', 'census-media', source_client=source,
+        recovery_client=recovery, database_url='postgresql://example')
 
 
-def _install_cloud_stubs(monkeypatch: pytest.MonkeyPatch, stack: dict) -> None:
-    firebase_admin = ModuleType('firebase_admin')
-    firebase_admin.initialize_app = MagicMock()
-    auth = ModuleType('firebase_admin.auth')
-    auth.list_users = MagicMock()
-    auth.list_users.return_value.iterate_all.return_value = stack['users']
-    firebase_admin.auth = auth
-    storage = ModuleType('google.cloud.storage')
-    storage.Client = MagicMock(side_effect=stack['client'])
-    admin_v1 = ModuleType('google.cloud.firestore_admin_v1')
-    admin_v1.FirestoreAdminClient = MagicMock(return_value=stack['admin_client'])
-    for name, module in {
-        'firebase_admin': firebase_admin,
-        'firebase_admin.auth': auth,
-        'google.cloud.storage': storage,
-        'google.cloud.firestore_admin_v1': admin_v1,
-    }.items():
-        monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.setattr(recovery_backup, 'datetime', _FrozenDateTime)
+@pytest.mark.parametrize('target', ['https://source.supabase.co', 'invalid'])
+def test_recovery_requires_different_project(target):
+    with pytest.raises(ValueError, match='different Supabase project'):
+        backup.create_backup('https://source.supabase.co', 'source', target, 'destination')
 
 
-def test_recovery_requires_different_project_and_bucket():
-    with pytest.raises(ValueError, match='different project and bucket'):
-        recovery_backup.create_backup('same', 'src', 'same', 'dst')
-    with pytest.raises(ValueError, match='different project and bucket'):
-        recovery_backup.create_backup('src-proj', 'shared', 'dst-proj', 'shared')
-
-
-def test_complete_marker_not_written_before_checksum_verification(monkeypatch: pytest.MonkeyPatch):
-    stack = _stack(checksum_ok=False)
-    _install_cloud_stubs(monkeypatch, stack)
+def test_complete_marker_not_written_before_checksum_verification(monkeypatch):
+    destination = Bucket(corrupt=True)
     with pytest.raises(RuntimeError, match='Backup verification failed'):
-        recovery_backup.create_backup('src-proj', 'src-bucket', 'dst-proj', 'dst-bucket')
-    complete = [name for name in stack['blobs'] if name.endswith('COMPLETE.json')]
-    assert complete == []
-    assert all(not blob.upload_from_string.called for blob in stack['blobs'].values())
+        run_backup(monkeypatch, destination)
+    assert not any(key.endswith('COMPLETE.json') for key in destination.objects)
 
 
-def test_snapshot_time_is_passed_to_export_documents(monkeypatch: pytest.MonkeyPatch):
-    stack = _stack(checksum_ok=True)
-    _install_cloud_stubs(monkeypatch, stack)
-    recovery_backup.create_backup('src-proj', 'src-bucket', 'dst-proj', 'dst-bucket')
-    request = stack['export_documents'].call_args.kwargs['request']
-    assert request['snapshot_time'] == SNAPSHOT
-    complete = [name for name, blob in stack['blobs'].items() if name.endswith('COMPLETE.json')]
-    assert len(complete) == 1
-    assert stack['blobs'][complete[0]].upload_from_string.called
+def test_complete_manifest_matches_copied_database_objects_and_identities(monkeypatch):
+    destination = Bucket()
+    result = run_backup(monkeypatch, destination)
+    manifest = json.loads(destination.objects[result['prefix'] + '/COMPLETE.json'])
+    assert result['objects'] == result['identities'] == 1
+    assert manifest['provider'] == 'supabase'
+    assert manifest['restore_access'] == 'closed'
+    assert manifest['password_policy'] == 'reset-required'
+    for key, checksum in [('database_export', 'database_sha256'), ('identities', 'identities_sha256')]:
+        assert backup.sha256(destination.objects[manifest[key]]) == manifest[checksum]
+    item = manifest['objects'][0]
+    assert destination.objects[item['target']] == b'scan'
+    assert item['sha256'] == backup.sha256(b'scan')
+    assert item['size'] == 4
+
+
+def test_database_dump_keeps_credentials_out_of_arguments(monkeypatch, tmp_path):
+    output = tmp_path / 'database.dump'
+    observed = {}
+    def run(args, **kwargs):
+        observed.update(args=args, **kwargs)
+        output.write_bytes(b'dump')
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(backup.subprocess, 'run', run)
+    url = 'postgresql://operator:test-password@db.example/postgres'
+    backup.database_dump(url, output)
+    assert url not in ' '.join(observed['args'])
+    assert observed['env']['PGDATABASE'] == url
+    assert {'--schema=workbench_private', '--schema=public', '--schema=auth'} <= set(observed['args'])
+
+
+def test_storage_inventory_recurses_and_paginates():
+    bucket = MagicMock()
+    def listing(prefix, options):
+        if prefix == 'originals':
+            return [{'name': 'scan.jpg', 'id': 'nested'}]
+        if options['offset'] == 0:
+            return [{'name': 'originals', 'id': None}] + [
+                {'name': str(i), 'id': str(i)} for i in range(999)]
+        return [{'name': 'last.jpg', 'id': 'last'}]
+    bucket.list.side_effect = listing
+    objects = list(backup.storage_objects(bucket))
+    assert len(objects) == 1001
+    assert objects[0] == 'originals/scan.jpg'
+    assert objects[-1] == 'last.jpg'

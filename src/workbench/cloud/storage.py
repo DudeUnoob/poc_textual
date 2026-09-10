@@ -1,4 +1,4 @@
-"""Private, immutable Cloud Storage operations for census scan images."""
+"""Private, immutable private Storage operations for census scan images."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -34,11 +34,11 @@ class UploadTooLargeError(UploadValidationError):
 
 
 class ObjectVerificationError(StorageServiceError):
-    """Cloud Storage metadata does not match the immutable page record."""
+    """private Storage metadata does not match the immutable page record."""
 
 
 class StorageOperationError(StorageServiceError):
-    """Cloud Storage failed before an object could be verified."""
+    """private Storage failed before an object could be verified."""
 
 
 class BucketLike(Protocol):
@@ -90,7 +90,7 @@ def _generation(value: Any, context: str) -> str:
 
 
 class StorageService:
-    """Typed Cloud Storage boundary around an injected private bucket."""
+    """Typed private Storage boundary around an injected private bucket."""
 
     def __init__(self, bucket: BucketLike, upload_limit_bytes: int | None = None):
         self._bucket = bucket
@@ -168,7 +168,7 @@ class StorageService:
                     )
                 except Exception:
                     raise StorageOperationError(
-                        f"Cloud Storage upload failed for page {page_id}; "
+                        f"private Storage upload failed for page {page_id}; "
                         "the page remains pending and may be retried."
                     ) from exc
 
@@ -304,7 +304,7 @@ class StorageService:
             )
         actual_size = getattr(blob, "size", None)
         if actual_size is None or int(actual_size) < 0:
-            raise ObjectVerificationError(f"Cloud Storage did not report a size for {object_name}.")
+            raise ObjectVerificationError(f"private Storage did not report a size for {object_name}.")
         if expected_size is not None and int(actual_size) != expected_size:
             raise ObjectVerificationError(
                 f"Size mismatch for {object_name}: expected {expected_size}, "

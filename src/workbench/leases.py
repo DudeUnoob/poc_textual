@@ -1,6 +1,6 @@
 """Local edit leases so two browsers cannot silently overwrite the same row.
 
-Firebase deployments use CloudRepository leases for Firestore rows. While the
+Supabase deployments use CloudRepository leases for Supabase Postgres rows. While the
 Jinja review screens still persist to SQLite, this table is the equivalent
 guard: acquire on GET, require on POST, expire after two minutes.
 """

@@ -20,7 +20,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from census_schemas import SUPPORTED_YEARS, workbook_filename, workbook_sheets
 from paths import GROUND_TRUTH_DIR
 from .access import (attach_principal, attach_response_cookies, current_principal,
-                     enforce, firebase_mode, require_admin, require_principal,
+                     enforce, supabase_mode, require_admin, require_principal,
                      reviewer_identity, submitted_csrf_token, template_context)
 from .db import (Batch, Export, ExtractionRun, FieldCandidate, Page,
                  SessionLocal, init_db, utc_now)
@@ -77,7 +77,7 @@ class AccessMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         attach_principal(request)
         csrf_token = None
-        if firebase_mode() and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if supabase_mode() and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             csrf_token = await submitted_csrf_token(request)
         blocked = enforce(request, csrf_token)
         if blocked is not None:
@@ -172,7 +172,7 @@ def render_row_crop(image_path: str, line: int, schema, field: str | None = None
 
 @app.get("/")
 def dashboard(request: Request):
-    if firebase_mode():
+    if supabase_mode():
         return RedirectResponse("/shared", status_code=303)
     with SessionLocal() as session:
         batches = session.scalars(select(Batch).options(joinedload(Batch.pages)).order_by(Batch.created_at.desc())).unique().all()
@@ -410,7 +410,7 @@ async def run_events(request: Request, run_id: int):
     previous: dict | None = None
     event_id = 0
     while not await request.is_disconnected():
-        if firebase_mode():
+        if supabase_mode():
             attach_principal(request)
             if current_principal(request) is None:
                 raise HTTPException(status_code=401, detail="Authentication required")
@@ -500,7 +500,7 @@ def review_row_next(request: Request, batch_id: int, skip_page_id: int | None = 
             for item in row_candidates
         }
         lease = None
-        if firebase_mode():
+        if supabase_mode():
             from .leases import LeaseError, acquire_lease, review_session_id, row_key
             principal = require_principal(request)
             try:
@@ -547,7 +547,7 @@ async def decide_row(request: Request, run_id: int, page_id: int, line_number: i
         )).all()
         if len(candidates) != len(set(candidate_ids)):
             raise HTTPException(status_code=400, detail="One or more row fields are no longer reviewable")
-        if firebase_mode():
+        if supabase_mode():
             from .leases import LeaseError, require_lease, release_lease, review_session_id, row_key
             principal = require_principal(request)
             try:
@@ -601,7 +601,7 @@ async def decide_row(request: Request, run_id: int, page_id: int, line_number: i
 @app.post("/review/leases/{run_id}/{page_id}/{line_number}/renew")
 def renew_review_lease(request: Request, run_id: int, page_id: int, line_number: int,
                        lease_token: str = Form(...), review_session: str = Form(...)):
-    if not firebase_mode():
+    if not supabase_mode():
         return {"ok": True}
     from .leases import LeaseError, renew_lease, row_key
     principal = require_principal(request)
@@ -669,7 +669,7 @@ def download_export(export_id: int, filename: str):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "firebase": firebase_mode()}
+    return {"ok": True, "supabase": supabase_mode()}
 
 
 @app.get("/api/workbook-sheets")
@@ -686,8 +686,8 @@ def available_workbook_sheets(year: int, schedule_type: str = "population"):
 
 @app.get("/login")
 def login_page(request: Request):
-    if current_principal(request) is not None:
-        return RedirectResponse("/shared" if firebase_mode() else "/", status_code=303)
+    if current_principal(request) is not None and request.query_params.get("recovery") != "1":
+        return RedirectResponse("/shared" if supabase_mode() else "/", status_code=303)
     return render(request, "login.html", {})
 
 
@@ -697,7 +697,7 @@ async def create_session(request: Request):
     from .auth import AuthError, establish_session
     from .cloud.repository import CloudError
 
-    if not firebase_mode():
+    if not supabase_mode():
         raise HTTPException(status_code=400, detail="Sessions are only used in the shared deployment.")
     payload = await request.json()
     response = RedirectResponse("/shared", status_code=303)
@@ -710,32 +710,38 @@ async def create_session(request: Request):
 
 @app.post("/logout")
 def logout(request: Request):
-    response = RedirectResponse("/login" if firebase_mode() else "/", status_code=303)
+    response = RedirectResponse("/login" if supabase_mode() else "/", status_code=303)
+    from .auth import clear_session
     try:
-        from .auth import clear_session
-        clear_session(response)
+        from .settings import session_cookie_name
+        from .supabase_client import create_admin_client
+        token = request.cookies.get(session_cookie_name())
+        if supabase_mode() and token:
+            create_admin_client().auth.admin.sign_out(token, scope="local")
     except Exception:
-        response.delete_cookie("session")
+        # Local cookies must clear even when the identity provider is unavailable.
+        pass
+    finally:
+        clear_session(response)
     return response
 
 
 @app.get("/admin")
 def admin_home(request: Request):
     require_admin(request)
-    if not firebase_mode():
+    if not supabase_mode():
         return render(request, "admin.html", {
             "members": [],
-            "notice": "Membership administration is available in the shared Firebase deployment.",
+            "notice": "Membership administration is available in the shared Supabase deployment.",
         })
     from uuid import uuid4
     from .cloud.repository import CloudRepository
-    from .cloud.store import FirebaseStore
-    from firebase_admin import firestore as firebase_firestore
-    members = CloudRepository(FirebaseStore(firebase_firestore.client())).list("members")
+    from .cloud.api import get_repository
+    members = get_repository().list("members")
     notice = None
     if request.query_params.get("revocation") == "pending":
         notice = (
-            "Application access is disabled. Firebase session revocation is "
+            "Application access is disabled. Supabase session revocation is "
             "pending operator reconciliation."
         )
     return render(request, "admin.html", {
@@ -755,13 +761,12 @@ def admin_update_member(
     operation_id: str = Form(...),
 ):
     actor = require_admin(request)
-    if not firebase_mode():
-        raise HTTPException(status_code=400, detail="Membership changes require the Firebase backend.")
-    from firebase_admin import firestore as firebase_firestore
+    if not supabase_mode():
+        raise HTTPException(status_code=400, detail="Membership changes require the Supabase backend.")
     from .cloud.repository import CloudRepository, Principal
-    from .cloud.store import FirebaseStore
+    from .cloud.api import get_repository
     principal = Principal(uid=actor.uid, email=actor.email, role=getattr(actor, "role", "admin"))
-    repository = CloudRepository(FirebaseStore(firebase_firestore.client()))
+    repository = get_repository()
     repository.change_member(
         principal,
         uid,
@@ -774,8 +779,14 @@ def admin_update_member(
     )
     if disabled in {"1", "true", "on", "yes"}:
         try:
-            from firebase_admin import auth as firebase_auth
-            firebase_auth.revoke_refresh_tokens(uid)
+            from .supabase_client import create_admin_client
+            create_admin_client().auth.admin.update_user_by_id(uid, {"ban_duration": "876000h"})
+        except Exception:
+            return RedirectResponse("/admin?revocation=pending", status_code=303)
+    else:
+        try:
+            from .supabase_client import create_admin_client
+            create_admin_client().auth.admin.update_user_by_id(uid, {"ban_duration": "none"})
         except Exception:
             return RedirectResponse("/admin?revocation=pending", status_code=303)
     return RedirectResponse("/admin", status_code=303)

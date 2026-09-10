@@ -1,4 +1,4 @@
-"""Build immutable research exports from a finalized Firestore release."""
+"""Build immutable research exports from a finalized Supabase Postgres release."""
 from __future__ import annotations
 
 import csv

@@ -1,13 +1,13 @@
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from workbench.access import (LocalPrincipal, firebase_mode, reviewer_identity,
+from workbench.access import (LocalPrincipal, supabase_mode, reviewer_identity,
                               wants_html)
 
 
 def test_local_mode_is_the_default(monkeypatch):
     monkeypatch.delenv("WORKBENCH_BACKEND", raising=False)
-    assert firebase_mode() is False
+    assert supabase_mode() is False
 
 
 def test_reviewer_identity_uses_submitted_name_locally():

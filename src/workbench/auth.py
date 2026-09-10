@@ -1,29 +1,23 @@
-"""Firebase Auth session cookies, domain membership, and CSRF helpers."""
+"""Supabase verified access tokens in HttpOnly cookies, membership, and CSRF."""
 from __future__ import annotations
 
 import hmac
 import secrets
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from workbench.cloud.repository import Principal
-from workbench.settings import (
-    cookies_secure,
-    email_allowed,
-    firebase_project_id,
-    firebase_storage_bucket,
-    is_firebase,
-    session_cookie_name,
-)
+from workbench.settings import cookies_secure, email_allowed, session_cookie_name
+from workbench.supabase_client import create_admin_client
+import base64
+import json
 
-SESSION_EXPIRES = timedelta(days=5)
+SESSION_EXPIRES = timedelta(hours=1)
 RECENT_SIGN_IN_SECONDS = 5 * 60
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER = "x-csrf-token"
 CSRF_FIELD = "csrf_token"
-
-_firebase_app: Any = None
 
 
 class AuthError(Exception):
@@ -32,36 +26,50 @@ class AuthError(Exception):
         self.status = status
 
 
-def init_firebase() -> Any:
-    """Lazy Admin SDK init via Application Default Credentials."""
-    global _firebase_app
-    if _firebase_app is not None:
-        return _firebase_app
-    import firebase_admin
-    from firebase_admin import credentials
-
-    options: dict[str, str] = {}
-    project_id = firebase_project_id()
-    bucket = firebase_storage_bucket()
-    if project_id:
-        options["projectId"] = project_id
-    if bucket:
-        options["storageBucket"] = bucket
+def _token_payload(token: str) -> dict:
+    # Used only AFTER get_user verifies this exact token with Supabase Auth.
     try:
-        _firebase_app = firebase_admin.get_app()
-    except ValueError:
-        _firebase_app = firebase_admin.initialize_app(
-            credentials.ApplicationDefault(),
-            options or None,
-        )
-    return _firebase_app
+        part = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+    except Exception as exc:
+        raise AuthError("Invalid access token") from exc
 
 
-def _auth_module() -> Any:
-    init_firebase()
-    from firebase_admin import auth
-
-    return auth
+def verify_access_token(token: str, *, auth_client=None, now=None) -> dict:
+    client = auth_client or create_admin_client()
+    try:
+        user = client.auth.get_user(token).user
+        payload = _token_payload(token)
+        clock = time.time() if now is None else now
+        if not user or payload.get("sub") != str(user.id) or float(payload.get("exp", 0)) <= clock:
+            raise AuthError("Expired or invalid session")
+        banned_until = getattr(user, "banned_until", None)
+        if banned_until:
+            if isinstance(banned_until, str):
+                banned_until = datetime.fromisoformat(banned_until.replace("Z", "+00:00"))
+            if banned_until.tzinfo is None:
+                banned_until = banned_until.replace(tzinfo=timezone.utc)
+            if banned_until.timestamp() > clock:
+                raise AuthError("Account disabled", 403)
+        if str(payload.get("email") or "").casefold() != str(user.email or "").casefold():
+            raise AuthError("Email changed; sign in again", 401)
+        password_times = [int(item.get("timestamp", 0)) for item in payload.get("amr", [])
+                          if item.get("method") == "password"]
+        session_id = payload.get("session_id")
+        if not session_id or client.rpc("workbench_session_active", {
+            "p_session_id": session_id, "p_uid": str(user.id),
+        }).execute().data is not True:
+            raise AuthError("Session revoked")
+        claims = {"uid": str(user.id), "sub": str(user.id), "email": user.email,
+                  "email_verified": bool(user.email_confirmed_at),
+                  "auth_time": max(password_times, default=0), "exp": payload["exp"],
+                  "session_id": session_id}
+        require_verified_university_email(claims)
+        return claims
+    except AuthError:
+        raise
+    except Exception as exc:
+        raise AuthError("Invalid session") from exc
 
 
 def require_verified_university_email(claims: dict[str, Any]) -> str:
@@ -97,25 +105,12 @@ def create_session_cookie(
 ) -> str:
     if not isinstance(id_token, str) or not id_token.strip():
         raise AuthError("Missing ID token", 400)
-    client = auth_client or _auth_module()
-    try:
-        claims = client.verify_id_token(id_token)
-    except AuthError:
-        raise
-    except Exception as exc:
-        raise AuthError("Invalid ID token", 401) from exc
-    require_verified_university_email(claims)
-    auth_time = int(claims.get("auth_time") or 0)
+    claims = verify_access_token(id_token, auth_client=auth_client, now=now)
     clock = time.time() if now is None else now
-    if clock - auth_time > RECENT_SIGN_IN_SECONDS:
+    age = clock - int(claims.get("auth_time") or 0)
+    if age < -60 or age > RECENT_SIGN_IN_SECONDS:
         raise AuthError("Recent sign-in required", 401)
-    try:
-        cookie = client.create_session_cookie(id_token, expires_in=expires_in)
-    except Exception as exc:
-        raise AuthError("Could not create session", 401) from exc
-    if isinstance(cookie, bytes):
-        return cookie.decode()
-    return str(cookie)
+    return id_token
 
 
 def verify_request_session(
@@ -127,13 +122,8 @@ def verify_request_session(
     cookie = (getattr(request, "cookies", None) or {}).get(session_cookie_name())
     if not cookie:
         raise AuthError("Not signed in", 401)
-    client = auth_client or _auth_module()
-    try:
-        claims = client.verify_session_cookie(cookie, check_revoked=check_revoked)
-    except Exception as exc:
-        raise AuthError("Invalid session", 401) from exc
-    require_verified_university_email(claims)
-    return claims
+    # Always check revocation, even if a legacy caller supplies False.
+    return verify_access_token(cookie, auth_client=auth_client)
 
 
 def new_csrf_token() -> str:
@@ -195,18 +185,15 @@ def csrf_token(request: Any) -> str:
 
 def establish_session(request: Any, response: Any, id_token: str, *, auth_client: Any | None = None) -> str:
     cookie = create_session_cookie(id_token, auth_client=auth_client)
-    attach_session_cookie(response, cookie)
-    existing = csrf_token(request)
-    attach_csrf_cookie(response, existing or new_csrf_token())
-    client = auth_client or _auth_module()
-    claims = client.verify_id_token(id_token)
+    claims = verify_access_token(cookie, auth_client=auth_client)
     uid, email = identity_from_claims(claims)
-    if is_firebase():
-        from firebase_admin import firestore as firebase_firestore
+    from workbench.settings import is_supabase
+    if is_supabase():
         from workbench.cloud.repository import CloudRepository
-        from workbench.cloud.store import FirebaseStore
-
-        CloudRepository(FirebaseStore(firebase_firestore.client())).ensure_member(uid, email)
+        from workbench.cloud.store import SupabaseStore
+        CloudRepository(SupabaseStore(create_admin_client())).ensure_member(uid, email)
+    attach_session_cookie(response, cookie)
+    attach_csrf_cookie(response, new_csrf_token())
     return cookie
 
 
@@ -230,8 +217,6 @@ __all__ = [
     "establish_session",
     "csrf_cookie_params",
     "identity_from_claims",
-    "init_firebase",
-    "is_firebase",
     "new_csrf_token",
     "principal_from_claims",
     "require_verified_university_email",

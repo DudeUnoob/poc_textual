@@ -21,3 +21,6 @@ credentials*.json
 firebase-debug.log
 firestore-debug.log
 ui-debug.log
+
+# Supabase CLI local cache
+supabase/.temp/
