@@ -65,3 +65,27 @@ def test_existing_extractor_routes_catalog_models_without_gemini(monkeypatch):
     monkeypatch.setattr(extract,'get_client',lambda:pytest.fail('Gemini must not be initialized'))
     records,diagnostics,candidates=extract.extract_with_review_data('unused',1880,model='@catalog/model')
     assert diagnostics['strategy']=='portkey_full_page' and records==[]
+
+
+def test_cache_reuses_identical_requests_but_not_a_changed_token_allowance(tmp_path,monkeypatch):
+    import json
+    import pandas as pd
+    frame=pd.DataFrame({'Line Number':[1],'Surname':['Jones']})
+    monkeypatch.setattr(benchmark.pd,'read_excel',lambda *a,**k:frame)
+    image=tmp_path/'scan.png';image.write_bytes(b'mocked image')
+    workbook=tmp_path/'truth.xlsx';workbook.write_bytes(b'mocked workbook')
+    plan=tmp_path/'plan.json';plan.write_text(json.dumps({'models':['@test/claude-test'],'jobs':[
+        {'year':1880,'image':str(image),'workbook':str(workbook),'sheet':'Bastrop','gt_page':1,
+         'alignment_verified':True,'fields':['Surname']}]}))
+    calls=[]
+    def extract(*args,**kwargs):
+        calls.append(args)
+        return {'records':frame.to_dict('records'),'elapsed_seconds':1,'usage':{}}
+    monkeypatch.setattr(benchmark,'extract',extract)
+    monkeypatch.setenv('PORTKEY_MAX_OUTPUT_TOKENS','16000')
+    benchmark.run(plan,tmp_path/'out',True)
+    benchmark.run(plan,tmp_path/'out',True)
+    assert len(calls)==1
+    monkeypatch.setenv('PORTKEY_MAX_OUTPUT_TOKENS','32000')
+    benchmark.run(plan,tmp_path/'out',True)
+    assert len(calls)==2

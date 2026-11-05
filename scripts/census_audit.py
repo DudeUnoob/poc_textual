@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 import random
+import re
 import sys
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'src'),str(ROOT/'scripts')]
@@ -60,7 +61,7 @@ def summarize(group, keys):
 
 
 def build(report):
-    jobs=report['plan']['jobs'];positions={};payloads={};columns={}
+    jobs=report['plan']['jobs'];positions={};payloads={};columns={};scan_provenance=[]
     for i,job in enumerate(jobs,1):
         frame=pd.read_excel(job['workbook'],sheet_name=job['sheet'])
         columns[i]=list(frame.columns)
@@ -73,7 +74,13 @@ def build(report):
     for summary in report['summary']:
         path=Path(summary['artifact'])
         if not path.is_absolute():path=ROOT/path
-        payloads[(summary['job'],summary['model'])]=json.loads(path.read_text())
+        payload=json.loads(path.read_text())
+        payloads[(summary['job'],summary['model'])]=payload
+        scan_provenance.append({'job':summary['job'],'year':summary['year'],'model':summary['model'],
+            'resolved_model':payload.get('resolved_model'),'request_id':payload.get('request_id'),
+            'image_sha256':payload['image_sha256'],'prompt_sha256':payload['prompt_sha256'],
+            'input_image_size':payload.get('input_image_size'),'pipeline_version':payload.get('pipeline_version'),
+            'image':summary['image']})
     cells=[]
     for original in report['cells']:
         c=dict(original);job=jobs[c['job']-1];payload=payloads[(c['job'],c['model'])]
@@ -101,6 +108,9 @@ def build(report):
         c['discrepancy_type']=('none' if c['match'] else c['row_status']+'_row' if c['row_status']!='aligned'
             else 'blank_vs_value' if c['raw'] is None or c['ground_truth'] is None
             else 'code_or_vocabulary_review' if c['field']=='Race' else 'value_mismatch')
+        if c['field']=='Age' and re.match(r'^\d{4}-\d{2}-\d{2}',str(c['ground_truth'])):
+            c['reference_note']='Age stored as a date. Review the scan and cleaning protocol; no correction was applied.'
+            if not c['match'] and c['row_status']=='aligned':c['discrepancy_type']='ground_truth_age_date_review'
         c['review_disposition']='unreviewed' if not c['match'] else 'match_under_declared_rule'
         c['ground_truth_issue_confirmed']=False
         cells.append(c)
@@ -127,11 +137,18 @@ def build(report):
         for label in ('high','medium','low','unknown'):
             g=[c for c in aligned if c['model_confidence']==label]
             calibration.append(summarize(g,{**tags,'confidence_label':label}))
-        for policy,allowed in [('high only',{'high'}),('high + medium',{'high','medium'}),('all labeled',{'high','medium','low'})]:
+        policies=[('high only',lambda c:c['model_confidence']=='high'),
+                  ('high + medium',lambda c:c['model_confidence'] in {'high','medium'}),
+                  ('all labeled',lambda c:c['model_confidence'] in {'high','medium','low'})]
+        if any(c['confidence_probability'] is not None for c in group):
+            for threshold in (.90,.95,.99):
+                policies.append((f'numeric self-report >= {threshold:.0%}',
+                    lambda c,t=threshold:c['confidence_probability'] is not None and c['confidence_probability']>=t))
+        for policy,accept in policies:
             # A real automation rule cannot consult ground-truth match flags.
             # Nonempty predicted fields are eligible; extra predictions count as wrong.
             eligible=[c for c in group if c['row_status']!='missing' and c['extracted'] not in (None,'')]
-            accepted=[c for c in eligible if c['model_confidence'] in allowed]
+            accepted=[c for c in eligible if accept(c)]
             summary=summarize(accepted,{**tags,'policy':policy})
             precision=summary.pop('observed_accuracy')
             summary.update({'accepted_predictions':len(accepted),'eligible_predictions':len(eligible),
@@ -164,11 +181,32 @@ def build(report):
         'Bootstrap intervals resample scans and are withheld below five scans per stratum. Even five scans is not evidence of transportability.',
         'Errors per 1000 are same-domain reference projections, not validated forecasts for uncleaned districts.',
         'Calibration, threshold choice and evaluation should use disjoint scan/district partitions. This pilot has no held-out district.',
-        'No numeric probability was collected in historical extractions. Numeric confidence, Brier and reliability bins are unavailable for those records.',
+        'Numeric confidence, Brier scores and reliability bins use only responses that actually contain numeric self-reports. Historical label-only responses have no numeric estimate.',
         'Codes/blank-vs-value flags are review suggestions, not confirmed mistakes in ground truth. No discrepancies were excluded.',
+        'Age cells stored as dates are flagged for reference review. Their original values and mismatches are retained without guessing the intended fraction.',
         'All actual observed fields are supplied; fields not requested in the original pilot were not tested and must not be treated as validated.'
     ]
-    return {'created_utc':report['created_utc'],'scan_results':report['summary'],'rows':rows,'cells':cells,
+    overview=[]
+    for model,year in sorted({(r['model'],r['year']) for r in report['summary']}):
+        group=[c for c in cells if c['model']==model and c['year']==year]
+        scans=[r for r in report['summary'] if r['model']==model and r['year']==year]
+        aligned_high=[c for c in group if c['row_status']=='aligned' and c['model_confidence']=='high']
+        row_group=[r for r in rows if r['model']==model and r['year']==year]
+        overview.append({**summarize(group,{'year':year,'model':model}),
+            'strict_rows_matched':sum(r['strict_row_match'] for r in row_group),
+            'rows_scored_including_extra':len(row_group),
+            'strict_row_agreement':sum(r['strict_row_match'] for r in row_group)/len(row_group) if row_group else None,
+            'missing_rows':sum(r['missing_rows'] for r in scans),
+            'extra_rows':sum(r['extra_rows'] for r in scans),
+            'aligned_high_confidence_values':len(aligned_high),
+            'aligned_high_confidence_errors':sum(not c['match'] for c in aligned_high),
+            'aligned_high_confidence_agreement':sum(c['match'] for c in aligned_high)/len(aligned_high) if aligned_high else None,
+            'elapsed_seconds':sum(r.get('elapsed_seconds',0) for r in scans),
+            'input_tokens':sum(r.get('input_tokens') or 0 for r in scans),
+            'output_tokens':sum(r.get('output_tokens') or 0 for r in scans)})
+    return {'created_utc':report['created_utc'],'started_utc':report.get('started_utc'),
+            'overview':overview,'provider_configs':report.get('provider_configs',[]),
+            'scan_results':report['summary'],'scan_provenance':scan_provenance,'rows':rows,'cells':cells,
             'discrepancies':[c for c in cells if not c['match']], 'confidence_calibration':calibration,
             'threshold_policies':thresholds,'decade_fields':year_fields,'numeric_confidence':probability,'reliability_bins':reliability,
             'failures':report['failures'],'notes':notes,'plan':report['plan']}
@@ -178,7 +216,7 @@ def inventory():
     index=json.loads((ROOT/'schemas/ground_truth_index.json').read_text())
     rows=[]
     for year,data in index.items():
-        folders=[p for p in (ROOT/'data/raw_images').iterdir() if p.is_dir() and p.name.startswith(year+'_')]
+        folders=[p for p in (ROOT/'data/raw_images').glob('*') if p.is_dir() and p.name.startswith(year+'_')]
         images=[p for d in folders for p in d.iterdir() if p.suffix.lower() in ('.jpg','.jpeg','.png','.tif','.tiff')]
         rows.append({'year':int(year),'workbook':data['file'],'tabs':'; '.join(data['sheets']),
             'local_scans':len(images),'status':'candidate scans; verify alignment' if images else 'needs matched scan acquisition',
@@ -206,7 +244,7 @@ def main():
     args=parser.parse_args();audit=build(json.loads(args.report.read_text()));audit['decade_inventory']=inventory();audit['variable_coverage']=variable_coverage(audit)
     args.output.mkdir(parents=True,exist_ok=True)
     (args.output/'audit.json').write_text(json.dumps(audit,indent=2,default=str))
-    for key in ('scan_results','rows','cells','discrepancies','confidence_calibration','threshold_policies','decade_fields','numeric_confidence','reliability_bins','decade_inventory','variable_coverage','failures'):
+    for key in ('overview','scan_results','scan_provenance','rows','cells','discrepancies','confidence_calibration','threshold_policies','decade_fields','numeric_confidence','reliability_bins','decade_inventory','variable_coverage','failures'):
         csv_write(args.output/(key+'.csv'),audit[key])
     print(f'{len(audit["scan_results"])} scan/model results; {len(audit["rows"])} rows; {len(audit["cells"])} cells; {len(audit["discrepancies"])} discrepancies')
 

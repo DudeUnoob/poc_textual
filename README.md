@@ -67,24 +67,27 @@ CLI. No GPU or downloaded model is required.
 ## Reproducible ground-truth tests
 
 Use [the Portkey workflow](PORTKEY_WORKFLOW.md) and the portable
-[teammate skill](skills/census-ground-test/SKILL.md). The teammate supplies years
-and scan folders; the workflow creates a plan, verifies each image against the
-correct Excel rows, runs both configured models on identical inputs, and writes
-scan, row and cell evidence. A default three-page guard avoids accidentally
-processing a whole directory.
+[teammate skill](skills/census-ground-test/SKILL.md). The teammate supplies years,
+a batch ZIP, or a scan folder. Codex handles the plan and verifies image-to-Excel
+alignment, then runs both configured models and delivers the granular XLSX and
+evidence ZIP. The default sample is three scans per year; request the full batch
+explicitly to test every supplied scan. Their own Portkey key and catalog routes
+are configured once with `python scripts/census_ground_test.py configure`.
 
 ```
-python scripts/census_benchmark.py prepare --year 1880 --images data/raw_images/1880_008 --sheet "Bastrop 0008" --output configs/my-test.json
-python scripts/census_benchmark.py run configs/my-test.json --output results/my-test
+python scripts/census_ground_test.py prepare --years 1880 1910 --output results/my-test
+python scripts/census_ground_test.py run results/my-test/plan.json --output results/my-test
 ```
 
 Verify the plan's page alignment and select the requested pages before adding
 `--execute`. Example configs use generic catalog names; regenerate them with
-`prepare` or replace those names with your own. They require locally available
+`prepare` or replace those names with your own. Exact, previously reviewed image
+and workbook hashes reuse saved mappings; Codex verifies unfamiliar scans.
+These tests require locally available
 images and cleaned workbooks; private keys and new downloads are not committed.
 
 ```
-python scripts/census_audit.py results/my-test/report.json --output results/my-audit
+python scripts/census_ground_test.py finish results/my-test/plan.json --output results/my-test --node NODE_PATH
 ```
 
 The [workbook reading guide](docs/WORKBOOK_GUIDE.md) explains denominators,

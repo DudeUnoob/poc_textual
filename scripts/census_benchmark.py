@@ -14,6 +14,7 @@ import pandas as pd
 from compare import split_into_physical_pages
 from fuzzywuzzy.fuzz import ratio
 from portkey_extract import DEFAULT_MODEL, COMPARISON_MODEL, extract, request_json
+from provider_config import get_provider_config
 
 CORE = ['Surname', 'Given Name', 'Race', 'Gender', 'Sex', 'Age',
         'Relationship', 'Relation to Head of House', 'Relation to Head',
@@ -136,22 +137,37 @@ def run(plan_path, output, execute=False, limit=3):
         truth = truth_for(job)
         score({'records': []}, truth, job['fields'])  # Reject duplicate/invalid GT keys before spending.
         if not Path(job['image']).is_file():raise ValueError('Image missing')
-    print(f'{len(jobs)} verified pages x {len(models)} models = {len(jobs)*len(models)} page calls (up to 3 transport attempts each).')
+        for name,key in [('image','image_sha256'),('workbook','workbook_sha256')]:
+            if job.get(key) and hashlib.sha256(Path(job[name]).read_bytes()).hexdigest()!=job[key]:
+                raise ValueError(f'Verified {name} changed; recheck page alignment before spending')
+    config=get_provider_config()
+    print(f'{len(jobs)} verified pages x {len(models)} models = {len(jobs)*len(models)} page calls (up to {config.attempts} transport attempts each).')
     if not execute: print('Plan is valid. Add --execute to call Portkey.');return
     output.mkdir(parents=True,exist_ok=True)
     summary,cells,failures=[],[],[]
+    started_utc=datetime.now(timezone.utc).isoformat()
+    def log_attempt(event):
+        with (output/'attempt_events.jsonl').open('a',encoding='utf-8') as stream:
+            stream.write(json.dumps({'utc':datetime.now(timezone.utc).isoformat(),**event})+'\n')
     account_error = False
     for i,job in enumerate(jobs):
         truth=truth_for(job)
         for model in models:
             identity={'job':job,'model':model,'image_hash':hashlib.sha256(Path(job['image']).read_bytes()).hexdigest(),
                       'workbook_hash':hashlib.sha256(Path(job['workbook']).read_bytes()).hexdigest(),
-                      'extractor_hash':hashlib.sha256((ROOT/'src/portkey_extract.py').read_bytes()).hexdigest()}
+                      'extractor_hash':hashlib.sha256((ROOT/'src/portkey_extract.py').read_bytes()).hexdigest(),
+                      'normalizer_hash':hashlib.sha256((ROOT/'src/utils.py').read_bytes()).hexdigest(),
+                      'provider_config':config.snapshot(model)}
             fingerprint=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
             saved=output/(fingerprint+'.json')
+            attempt={'job':i+1,'model':model,'image':job['image'],'fingerprint':fingerprint,
+                     'provider_config':config.snapshot(model)}
             try:
                 cached = saved.exists()
-                payload=json.loads(saved.read_text()) if cached else extract(job['image'],job['year'],job['fields'],model)
+                log_attempt({**attempt,'status':'cache_read' if cached else 'started'})
+                def on_event(event):
+                    log_attempt({**attempt,'status':event['type'],**{k:v for k,v in event.items() if k!='type'}})
+                payload=json.loads(saved.read_text()) if cached else extract(job['image'],job['year'],job['fields'],model,event_callback=on_event)
                 saved.write_text(json.dumps(payload,indent=2))
                 metrics,detail=score(payload,truth,job['fields'])
                 tags={'job':i+1,'year':job['year'],'image':job['image'],'sheet':job['sheet'],'gt_page':job['gt_page'],
@@ -160,9 +176,11 @@ def run(plan_path, output, execute=False, limit=3):
                                 'input_tokens':payload['usage'].get('prompt_tokens'),
                                 'output_tokens':payload['usage'].get('completion_tokens'), 'cached':cached, 'artifact':str(saved)})
                 cells.extend({**tags,**d} for d in detail)
+                log_attempt({**attempt,'status':'cached' if cached else 'completed','artifact':str(saved)})
                 print(f'{job["year"]} {Path(job["image"]).name} {model.split("/")[-1]}: {metrics["cell_accuracy"]:.1%}' + (' [cached; no API call]' if cached else ''))
             except Exception as exc:
-                failures.append({'job':i+1,'model':model,'error':str(exc)})
+                log_attempt({**attempt,'status':'failed','error':str(exc)})
+                failures.append({'job':i+1,'year':job['year'],'image':job['image'],'model':model,'error':str(exc)})
                 print(f'Failed job {i+1}, {model}: {exc}')
                 # Account/auth errors stop immediately; never spend through a broken configuration.
                 if any(f'HTTP {code}' in str(exc) for code in (401,402,403)):
@@ -183,8 +201,9 @@ def run(plan_path, output, execute=False, limit=3):
             group=[c for c in cells if c['model']==model and c['model_confidence']==label and c['row_status']=='aligned']
             confidence.append({'model':model,'self_reported_label':label,'observations':len(group),
                                'observed_accuracy':sum(c['match'] for c in group)/len(group) if group else None})
-    report={'created_utc':datetime.now(timezone.utc).isoformat(),'plan':plan,'summary':summary,'fields':fields,
+    report={'created_utc':datetime.now(timezone.utc).isoformat(),'started_utc':started_utc,'plan':plan,'summary':summary,'fields':fields,
             'confidence':confidence,'cells':cells,'failures':failures,
+            'provider_configs':[config.snapshot(m) for m in models],
             'notes':['Confidence labels are uncalibrated model self-reports; observed accuracy is measured separately.',
                      'Race uses literal-code normalization only; research recoding and ground-truth typos remain review items.',
                      'Missing and extra rows are errors. Blank agreement is included; nonblank accuracy is also reported.',

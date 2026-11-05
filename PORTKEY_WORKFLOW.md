@@ -25,6 +25,44 @@ preparation. The decade-specific extraction fields are separate from the old
 
 ## Teammate workflow
 
+The simplified skill accepts years, a ZIP, or a folder and handles the commands
+and page matching for the teammate. One-time local setup can use
+`python scripts/census_ground_test.py configure`: enter a hidden API key and
+select Anthropic/OpenAI models from that user's catalog when needed. It reuses
+the same model names under a different catalog automatically only when unique.
+No key or catalog from this checkout is embedded in the portable skill.
+
+For example, say: “Use $census-ground-test on this 1880 batch ZIP. Give me the
+granular audit workbook.” Years alone use the available local scan folders.
+The assistant starts with three scans per year unless another scope is requested.
+An explicitly requested full batch uses `--all-pages`. Unselected scans, covers,
+missing decades and unresolved mappings remain visible in the input inventory.
+
+The assistant's entry point is:
+
+```
+python scripts/census_ground_test.py prepare --years 1880 1910 --output results/my-test
+python scripts/census_ground_test.py run results/my-test/plan.json --output results/my-test
+python scripts/census_ground_test.py run results/my-test/plan.json --output results/my-test --execute --node NODE_PATH
+```
+
+Use `--input BATCH.zip` or `--input SCAN_FOLDER` on prepare when inputs are supplied.
+Page mappings are reused automatically only for exact image/workbook hash matches
+in `configs/verified-alignments.json`. The assistant visually verifies unfamiliar
+selected scans and resolves the plan. The teammate does not need to edit JSON.
+`finish` regenerates audit outputs from existing raw results without inference.
+The XLSX scope text, overview by year/model, filter tables, pending inputs, run
+coverage and request-attempt history are generated from the current run.
+The Word reading guide's numerical examples remain from the earlier pilot.
+
+Numeric confidence responses can exceed a 16,000-token cap. The expanded
+1880/1910 tests used `PORTKEY_MAX_OUTPUT_TOKENS=32000`. The new driver defaults to
+that allowance for its own process; `--max-output-tokens N` changes it without
+rewriting the workbench settings. Use a limit supported by your selected models.
+Truncated responses fail validation and are not scored.
+Keep failed/interrupted attempts visible when changing limits. These settings
+are part of the cache fingerprint, alongside extractor and normalization code.
+
 In Codex, install the portable `skills/census-ground-test` folder under your own
 `~/.codex/skills/`, then say:
 
