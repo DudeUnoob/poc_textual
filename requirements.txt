@@ -2,7 +2,7 @@ google-genai>=1.0
 pydantic>=2
 openpyxl
 pandas
-opencv-python
+opencv-python-headless
 Pillow
 fuzzywuzzy
 python-levenshtein

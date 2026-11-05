@@ -9,6 +9,7 @@
     <p>{{ batch.county }}, {{ batch.state }}{% if batch.source_reference %} · {{ batch.source_reference }}{% endif %}</p>
   </div>
   <div class="actions">
+    <a class="secondary button" href="/batches/{{ batch.id }}/models">Compare model drafts</a>
     {% if row_count %}<a class="button" href="/review/rows/next?batch_id={{ batch.id }}">Review {{ row_count }} rows</a>{% endif %}
     <form method="post" action="/batches/{{ batch.id }}/exports"><button class="secondary">Export reviewed data</button></form>
   </div>
@@ -33,7 +34,7 @@
 <section class="card extraction-panel">
   <div class="split-heading">
     <div><span class="eyebrow">Current operation</span><h2>Extraction</h2><p class="muted">Progress is saved after every page. Automatic retries and worker restarts never discard completed pages.</p></div>
-    {% if ready and not runs %}<form method="post" action="/batches/{{ batch.id }}/runs"><button>Start extraction</button></form>{% endif %}
+    {% if ready and not runs %}<form method="post" action="/batches/{{ batch.id }}/runs">{% include "model_choice.html" %}<button>Start extraction</button></form>{% endif %}
   </div>
   {% if not ready %}<p class="action-required">Finish the page manifest before extraction can start.</p>{% endif %}
   {% if runs %}{% set run = runs[0] %}{% set state = run_snapshots[run.id] %}
@@ -46,7 +47,7 @@
     <p class="run-meta">Run attempt <span data-attempt>{{ state.job_attempt or 1 }}</span> · Last update <span data-last-update>{{ state.last_update or '—' }}</span></p>
     <p class="action-required" data-action-required {% if not state.action_required %}hidden{% endif %}>{{ state.action_required or '' }}</p>
     <form method="post" action="/runs/{{ run.id }}/resume" data-resume {% if not state.can_resume %}hidden{% endif %}><button>Resume after resolving the issue</button><small>Already completed pages will be skipped.</small></form>
-    {% if run.status in ['queued', 'running', 'failed'] and (run.model != 'gemini-3.5-flash' or run.config.get('strategy') != 'row_blocks') %}<form method="post" action="/runs/{{ run.id }}/switch-to-fast" class="switch-fast"><button>Switch to fast extraction</button><small>Preserves this run for audit and starts a benchmarked Flash row-band run.</small></form>{% endif %}
+    {% if run.status in ['queued', 'running', 'failed'] and run.config.get('provider') != 'portkey' and not run.model.startswith('@') and (run.model != 'gemini-3.5-flash' or run.config.get('strategy') != 'row_blocks') %}<form method="post" action="/runs/{{ run.id }}/switch-to-fast" class="switch-fast"><button>Switch to fast extraction</button><small>Preserves this run for audit and starts a Flash row-band run in legacy Gemini mode.</small></form>{% endif %}
     {% if run.status in ['queued', 'running'] %}<form method="post" action="/runs/{{ run.id }}/cancel" class="stop-run"><button class="ghost">Stop safely</button><small>Completed pages remain available in this run.</small></form>{% endif %}
     <details class="event-log"><summary>Recent activity and technical details</summary><ol data-events>{% for event in state.events[-6:]|reverse %}<li>{{ event.at }} · {{ event.message or event.type }}</li>{% endfor %}</ol><div class="run-error" data-error {% if not state.error %}hidden{% endif %}><strong>Provider error</strong><pre>{{ state.error or '' }}</pre></div></details>
   </article>
@@ -55,6 +56,6 @@
 
 {% if runs|length > 1 %}<details class="card history-panel"><summary>Previous extraction runs ({{ runs|length - 1 }})</summary><div class="history-list">{% for run in runs[1:] %}{% set state = run_snapshots[run.id] %}<article><div><strong>Run #{{ run.id }}</strong><span>{{ run.model }}</span></div><div><span class="run-status status-{{ run.status }}">{{ run.status }}</span><span>{{ state.completed_pages }}/{{ state.total_pages }} pages</span></div><details><summary>View activity</summary><p>{{ state.message }}</p>{% if state.error %}<pre>{{ state.error }}</pre>{% endif %}</details></article>{% endfor %}</div></details>{% endif %}
 
-{% if runs and runs[0].status == 'completed' %}<details class="rerun-panel"><summary>Need a completely new extraction?</summary><p class="muted">A new run preserves this run for audit but replaces it as the active review dataset.</p><form method="post" action="/batches/{{ batch.id }}/runs"><button class="ghost">Start a new run</button></form></details>{% endif %}
+{% if runs and runs[0].status in ['completed', 'failed', 'cancelled'] %}<details class="rerun-panel"><summary>Need another model reading?</summary><p class="muted">A new run preserves previous drafts and decisions. The review queue uses the newest run with saved candidates.</p><form method="post" action="/batches/{{ batch.id }}/runs">{% include "model_choice.html" %}<button class="ghost">Start a new run</button></form></details>{% endif %}
 <script src="/static/progress.js" defer></script>
 {% endblock %}

@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "models": [
+    "@anthropic-census/claude-opus-5-5",
+    "@openai-census/gpt-6-astra"
+  ],
+  "jobs": [
+    {
+      "year": 1850,
+      "image": "data/raw_images/1850_Not_Stated/page-01.jpg",
+      "workbook": "data/ground_truth/Bastrop County 1850 Clean.xlsx",
+      "sheet": "Not Stated Census",
+      "gt_page": 1,
+      "alignment_verified": true,
+      "alignment_evidence": "Reynolds Sherman 34; Martha 22; visually checked original scan",
+      "fields": [
+        "Surname",
+        "Given Name",
+        "Race",
+        "Gender",
+        "Age",
+        "Birth Place",
+        "Occupation",
+        "Industry"
+      ]
+    },
+    {
+      "year": 1880,
+      "image": "data/raw_images/1880_008/page-01.jpg",
+      "workbook": "data/ground_truth/Bastrop County 1880 Clean.xlsx",
+      "sheet": "Bastrop 0008",
+      "gt_page": 1,
+      "alignment_verified": true,
+      "alignment_evidence": "Wertzner Chr./Charles 57; Franzisca 42; Selma 17; visually checked original scan",
+      "fields": [
+        "Surname",
+        "Given Name",
+        "Race",
+        "Gender",
+        "Age",
+        "Relation to Head of House",
+        "Birthplace",
+        "Occupation",
+        "Father's Birthplace",
+        "Mother's Birthplace"
+      ]
+    },
+    {
+      "year": 1910,
+      "image": "data/raw_images/1910_Bastrop_1/page-01.jpg",
+      "workbook": "data/ground_truth/Bastrop County 1910 Clean.xlsx",
+      "sheet": "Bastrop 1",
+      "gt_page": 1,
+      "alignment_verified": true,
+      "alignment_evidence": "Jones Ollie 35; Arabella 31; Ward Edward 46; visually checked original scan; first physical scan has lines 1-50, while GT continues to 100 and later repeats 51-100; use explicit first 50 data rows.",
+      "fields": [
+        "Surname",
+        "Given Name",
+        "Race",
+        "Gender",
+        "Age",
+        "Relationship",
+        "Birthplace",
+        "Occupation",
+        "Industry",
+        "Father's Birthplace",
+        "Mother's Birthplace"
+      ],
+      "gt_row_start": 1,
+      "gt_row_count": 50
+    }
+  ]
+}

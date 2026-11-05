@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "models": [
+    "@anthropic-census/claude-opus-5-5",
+    "@openai-census/gpt-6-astra"
+  ],
+  "jobs": [
+    {
+      "year": 1950,
+      "image": "data/raw_images/1950_11-2A/page-02.png",
+      "workbook": "data/ground_truth/Bastrop County 1950 Clean.xlsx",
+      "sheet": "Bastrop 11-2A",
+      "gt_page": 1,
+      "alignment_verified": true,
+      "alignment_evidence": "Viewer image 2 (image 1 is a cover), printed sheet 1: Lewis Jasper H 62 and Katharin 63; French Jessie F 68 and Annie 59. Visually verified source scan. GT first block has 28 rows; explicit vacant lines may be extra predictions.",
+      "fields": [
+        "Surname",
+        "Given Name",
+        "Race",
+        "Gender",
+        "Age",
+        "Relation to Head of House",
+        "Birth Place",
+        "Occupation",
+        "Industry"
+      ]
+    }
+  ]
+}

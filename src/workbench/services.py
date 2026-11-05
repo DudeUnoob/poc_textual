@@ -146,7 +146,8 @@ def persist_extraction(session: Session, run: ExtractionRun, page: Page, payload
         validation_warnings = warnings_by_line.get(line, [])
         warnings = reasons + validation_warnings
         can_auto_accept = (
-            item.get("model_confidence") == "high"
+            not run.model.startswith('@')
+            and item.get("model_confidence") == "high"
             and item.get("row_legibility") == "clear"
             and not item.get("conflict")
             and not warnings
@@ -245,7 +246,8 @@ def reclassify_run_candidates(session: Session, run_id: int,
     for candidate in candidates:
         warnings = [*candidate.reasons, *candidate.validation_warnings]
         can_auto_accept = (
-            candidate.page_id not in excluded
+            not session.get(ExtractionRun, run_id).model.startswith('@')
+            and candidate.page_id not in excluded
             and candidate.model_confidence == "high"
             and candidate.row_legibility == "clear"
             and not candidate.has_conflict
