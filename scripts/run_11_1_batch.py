@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch extract + compare for Bastrop ED 11-1 (1950) with the Gemini pipeline.
+"""Legacy ED 11-1 batch wrapper using the configured extraction provider.
 
 Imports the pipeline directly (no subprocess) so it is resilient and records
 model/config metadata. Outputs are resumable: an existing per-page extraction
@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from extract import DEFAULT_MODEL, process_sheet  # noqa: E402
 from compare import compare, print_report  # noqa: E402
+from provider_config import require_credentials
 
 IMAGE_DIR = ROOT / "data/raw_images/1950_11-1"
 OUTPUT_DIR = ROOT / "data/outputs/1950_11-1"
@@ -54,9 +55,8 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not (ROOT / ".env").exists() and not compare_only:
-        print("ERROR: cp .env.example .env and add GEMINI_API_KEY")
-        sys.exit(1)
+    if not compare_only:
+        require_credentials(DEFAULT_MODEL)
 
     def _extract_one(page: int) -> None:
         img = IMAGE_DIR / f"sheet_{page:02d}.jpg"
@@ -65,6 +65,8 @@ def main() -> None:
             print(f"SKIP page {page}: missing {img.name}")
             return
         if out_json.exists():
+            if json.loads(out_json.read_text()).get('model') != DEFAULT_MODEL:
+                raise ValueError('Cached extraction belongs to a different model. Use census_benchmark.py for model comparisons or a fresh output folder.')
             print(f"SKIP page {page}: already extracted ({out_json.name})")
             return
         process_sheet(str(img), YEAR, str(out_json))

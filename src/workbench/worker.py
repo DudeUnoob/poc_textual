@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload
 
 from extract import DEFAULT_MODEL, extract_with_review_data
+from provider_config import require_credentials
 
 from .config import RUNS_DIR
 from .db import ExtractionRun, FieldCandidate, Page, SessionLocal, init_db
@@ -64,6 +65,7 @@ def process_next_run() -> bool:
         session.commit()
         run_id, batch_id, model = run.id, run.batch_id, run.model
     try:
+        require_credentials(model)
         with SessionLocal() as session:
             run = session.get(ExtractionRun, run_id)
             pages = session.scalars(select(Page).where(Page.batch_id == batch_id, Page.kind == "census").options(joinedload(Page.batch)).order_by(Page.page_number)).all()
@@ -161,7 +163,7 @@ def process_next_run() -> bool:
             run.status, run.error, run.finished_at = "cancelled", None, datetime.utcnow()
             update_progress(
                 run, phase="cancelled",
-                message="Stopped safely; the fast replacement run is next",
+                message="Stopped safely; completed pages are preserved",
                 event={"type": "run_cancelled", "message": "Old extraction stopped safely"},
             )
             session.commit()

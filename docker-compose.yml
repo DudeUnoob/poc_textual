@@ -1,19 +1,41 @@
+x-provider-environment: &provider-environment
+  CENSUS_PROVIDER: ${CENSUS_PROVIDER:-portkey}
+  PORTKEY_API_KEY: ${PORTKEY_API_KEY:-}
+  PORTKEY_API_KEY_FILE: ${PORTKEY_API_KEY_FILE:-}
+  PORTKEY_MODEL: ${PORTKEY_MODEL:-@anthropic-census/claude-opus-5-5}
+  PORTKEY_COMPARISON_MODEL: ${PORTKEY_COMPARISON_MODEL:-@openai-census/gpt-6-astra}
+  PORTKEY_BASE_URL: ${PORTKEY_BASE_URL:-https://api.portkey.ai/v1}
+  PORTKEY_TIMEOUT_SECONDS: ${PORTKEY_TIMEOUT_SECONDS:-240}
+  PORTKEY_MAX_ATTEMPTS: ${PORTKEY_MAX_ATTEMPTS:-3}
+  PORTKEY_MAX_OUTPUT_TOKENS: ${PORTKEY_MAX_OUTPUT_TOKENS:-16000}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
+  WORKBENCH_DATA_DIR: /app/data/workbench
+
 services:
   web:
     build: .
+    init: true
     command: uvicorn workbench.web:app --host 0.0.0.0 --port 8000
     ports:
-      - "8000:8000"
-    environment:
-      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
-      WORKBENCH_DATA_DIR: /app/data/workbench
+      - "127.0.0.1:${WORKBENCH_PORT:-8000}:8000"
+    environment: *provider-environment
     volumes:
       - ./data/workbench:/app/data/workbench
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=5)"]
+      interval: 15s
+      timeout: 6s
+      start_period: 20s
+      retries: 3
   worker:
     build: .
+    init: true
     command: python -m workbench.worker
-    environment:
-      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
-      WORKBENCH_DATA_DIR: /app/data/workbench
+    stop_grace_period: 260s
+    depends_on:
+      web:
+        condition: service_healthy
+    environment: *provider-environment
     volumes:
       - ./data/workbench:/app/data/workbench

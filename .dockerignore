@@ -1,5 +1,13 @@
 .git
 venv
+.venv
+.env
+.env.*
+!.env.example
+node_modules
+**/node_modules
+outputs
+secrets
 __pycache__
 .pytest_cache
 data/ground_truth

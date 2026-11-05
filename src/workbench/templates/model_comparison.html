@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<a class="back" href="/batches/{{ batch.id }}">← {{ batch.name }}</a>
+<h1>Compare model drafts</h1>
+<p>The same scan and printed line are shown together. Agreement between models is not proof of correctness. Review the handwriting before accepting a value.</p>
+<p>These are original AI drafts; reviewer corrections remain separate. The normal review queue uses the newest run with saved candidates.</p>
+{% for run in runs %}<p>{{ 'Anthropic' if loop.index0 == 0 else 'OpenAI' }}: {% if run %}Run {{ run.id }} · {{ run.model }} · {{ run.status }}{% else %}No run queued{% endif %}</p>{% endfor %}
+<table><thead><tr><th>Scan and line</th><th>Field</th><th>Anthropic draft</th><th>OpenAI draft</th></tr></thead><tbody>
+{% for row in rows %}<tr>
+<td><a href="/pages/{{ row.page_id }}/image">Page {{ row.page_number }}</a> · Line {{ row.line }}</td>
+<td>{{ row.field }}</td>
+{% for key in ['primary','comparison'] %}<td>{% set item=row[key] %}{% if item %}{{ item.normalized_value if item.normalized_value is not none else 'Blank' }}<br><small>Model confidence: {{ item.model_confidence }}</small>{% if item.evidence.get('confidence_probability') is not none %}<br><small>Self-report: {{ '%.0f'|format(item.evidence.confidence_probability * 100) }}%</small>{% endif %}{% else %}Not returned{% endif %}</td>{% endfor %}
+</tr>{% else %}<tr><td colspan="4">No model drafts saved yet. Queue both models from the batch page.</td></tr>{% endfor %}
+</tbody></table>
+<p>Comparison page {{ page }} · {{ total }} field entries</p>
+{% if page > 1 %}<a href="?page={{ page - 1 }}">Previous</a>{% endif %}
+{% if has_next %}<a href="?page={{ page + 1 }}">Next</a>{% endif %}
+{% endblock %}

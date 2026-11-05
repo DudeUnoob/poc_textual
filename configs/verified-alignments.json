@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "note": "Prior visual alignment review. Reuse only when BOTH image and cleaned workbook hashes match. These are page mappings, not adjudicated transcription answers.",
+  "alignments": [
+    {
+      "year": 1850,
+      "sheet": "Not Stated Census",
+      "gt_page": 1,
+      "alignment_evidence": "Reynolds Sherman 34; Martha 22; visually checked original scan",
+      "image_sha256": "e4e4f423b1940ff365de23fc6651efaded5ea166b79850d027660d6d6ea742fb",
+      "workbook_sha256": "f3d0d985ad37b7decaaf627b5b3f3b14c0c4944b295fe2a0af7445a8b94ddf37"
+    },
+    {
+      "year": 1880,
+      "sheet": "Bastrop 0008",
+      "gt_page": 1,
+      "alignment_evidence": "Wertzner Chr./Charles 57; Franzisca 42; Selma 17; visually checked original scan",
+      "image_sha256": "7ef82a92f00c2017405fb216a6396a5025b7281548e888b311f52d57b5c9db3d",
+      "workbook_sha256": "8544bf6a28641ae6223125b206569bb14cab2d28352c518669e2af0b8c7a67c0"
+    },
+    {
+      "year": 1910,
+      "sheet": "Bastrop 1",
+      "gt_page": 1,
+      "gt_row_start": 1,
+      "gt_row_count": 50,
+      "alignment_evidence": "Jones Ollie 35; Arabella 31; Ward Edward 46; visually checked original scan; first physical scan has lines 1-50, while GT continues to 100 and later repeats 51-100; use explicit first 50 data rows.",
+      "image_sha256": "057af2592a0ce1250e788b3b0c154706f3e2e61b8d239b23a8e1f1ccdd0f7fd0",
+      "workbook_sha256": "fa236c97730090a6ba16326af40d654eb3176e4a3e64c8cd56d52874c6e768ce"
+    },
+    {
+      "year": 1950,
+      "sheet": "Bastrop 11-2A",
+      "gt_page": 1,
+      "alignment_evidence": "Viewer image 2 (image 1 is a cover), printed sheet 1: Lewis Jasper H 62 and Katharin 63; French Jessie F 68 and Annie 59. Visually verified source scan. GT first block has 28 rows; explicit vacant lines may be extra predictions.",
+      "image_sha256": "e0db4985596c33d4a72f33d893774aa2a3521b9cc504131d4561c944f5b54fab",
+      "workbook_sha256": "a6fd33ce3072570fd5b45c13b083474f59b25f87081bb78414c758965f2073d7"
+    },
+    {
+      "year": 1880,
+      "sheet": "Bastrop 0008",
+      "gt_page": 2,
+      "gt_row_start": 49,
+      "gt_row_count": 48,
+      "alignment_evidence": "Visually verified original page 2: Meller William 48; Hellena 38; Antonia 18; Fuest L.R.27; last occupied line48 Hancock Ferdenand2. GT data rows49-96.",
+      "image_sha256": "c48088132701b23bf2b2273d63f353cc53a09ca81972d37a54d0cbe7a566cb10",
+      "workbook_sha256": "8544bf6a28641ae6223125b206569bb14cab2d28352c518669e2af0b8c7a67c0"
+    },
+    {
+      "year": 1880,
+      "sheet": "Bastrop 0008",
+      "gt_page": 3,
+      "gt_row_start": 97,
+      "gt_row_count": 49,
+      "alignment_evidence": "Visually verified original page3: Shaffer Charles48; Anna59; Beacher Richard31; Johnson John55; last occupied line49 Reding James34. GT data rows97-145.",
+      "image_sha256": "b73bf33efcd726674ea2fd22adb1dfb731590a433ff152f66d661ba0f4929880",
+      "workbook_sha256": "8544bf6a28641ae6223125b206569bb14cab2d28352c518669e2af0b8c7a67c0"
+    },
+    {
+      "year": 1910,
+      "sheet": "Bastrop 1",
+      "gt_page": 1,
+      "gt_row_start": 51,
+      "gt_row_count": 50,
+      "alignment_evidence": "Visually verified original sheet1B: Kerr Delia8; Viola5; Baby2; Jones David26; end line100 Craft Monwell19. Printed lines51-100; GT data rows51-100.",
+      "image_sha256": "a56c0f0f7ec80f3f2ce1eab1618c2c947e9efec2edfe2affead056a19ef46b84",
+      "workbook_sha256": "fa236c97730090a6ba16326af40d654eb3176e4a3e64c8cd56d52874c6e768ce"
+    },
+    {
+      "year": 1910,
+      "sheet": "Bastrop 1",
+      "gt_page": 1,
+      "gt_row_start": 101,
+      "gt_row_count": 50,
+      "alignment_evidence": "Visually verified original sheet2A corrected by hand: Craft A48; Violet44; Moore Alfred81; Polly79; end line100 Chambers Green44. Preprinted lines51-100 repeat; handwritten left numbering1-50. Align using printed numbers matching GT data rows101-150.",
+      "image_sha256": "9d1d15f30a4b067c5cbe75f4f8f58eb7941f55051bb059043d565b5294b3a1ca",
+      "workbook_sha256": "fa236c97730090a6ba16326af40d654eb3176e4a3e64c8cd56d52874c6e768ce"
+    }
+  ]
+}
