@@ -30,12 +30,13 @@ from preprocess import Crop, make_row_block_crops, make_targeted_crop, prepare_f
 from models import (FIELD_TO_GT_COLUMN_1950, ExtractionBatch, FieldConfidence,
                     Legibility, PersonRecord1950, to_gt_record)
 from reconcile import reconcile_page
+from provider_config import get_provider_config, credential
 from utils import (BIRTHPLACE_COLUMN, GENDER_COLUMN, normalize_gender,
                    normalize_marital_status, normalize_race, propagate_dittos)
 
 load_dotenv()
 
-DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+DEFAULT_MODEL = get_provider_config().model
 DEFAULT_TEMPERATURE = float(os.environ.get("GEMINI_TEMPERATURE", "0.0"))
 MAX_RETRIES_API = 3
 # Thinking-tier models spend output-token budget on internal reasoning before
@@ -52,7 +53,7 @@ DATA_AREA_BY_YEAR = {1950: (0.32, 0.645)}
 
 def get_client() -> genai.Client:
     """Build a Gemini client from GEMINI_API_KEY (or GOOGLE_API_KEY)."""
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key = credential("GEMINI_API_KEY") or credential("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError(
             "GEMINI_API_KEY not set. Copy .env.example to .env and add your key."
@@ -379,6 +380,32 @@ def extract_with_review_data(
     parallelism: int = 3,
 ) -> tuple[list[dict], dict, list[dict]]:
     """Extract one page and return canonical records plus review provenance."""
+    if model.startswith('@'):
+        from portkey_extract import extract as portkey_extract
+        from paths import SCHEMAS_DIR
+        fields = json.loads((SCHEMAS_DIR / 'columns_by_decade.json').read_text())[str(year)]
+        supported = set(FIELD_TO_GT_COLUMN_1950.values()) | {
+            'Sex', 'Relationship', 'Relation to Head', 'Birthplace',
+            "Father's Birthplace", "Mother's Birthplace"}
+        fields = [f for f in fields if f in supported and f != 'Line Number']
+        payload = (portkey_extract(image_path, year, fields, model, event_callback=event_callback)
+                   if event_callback else portkey_extract(image_path, year, fields, model))
+        confidences = {r['line_number']: r['fields'] for r in payload['confidence']}
+        candidates = []
+        for raw, normalized in zip(payload['raw_records'], payload['records']):
+            for field in fields:
+                confidence = confidences[raw['Line Number']].get(field, 'unknown')
+                candidates.append({'line_number': raw['Line Number'], 'field': field,
+                    'raw_value': raw[field], 'normalized_value': normalized[field],
+                    'model_confidence': confidence if confidence != 'unknown' else 'low',
+                    'source_pass': 'portkey_full_page', 'row_legibility': 'partial',
+                    'conflict': False, 'reasons': ['uncalibrated confidence'] if confidence != 'high' else [],
+                    'evidence': {'confidence_probability': next((c.get('probabilities', {}).get(field) for c in payload['confidence'] if c['line_number']==raw['Line Number']), None)}})
+        diagnostics = {k: payload[k] for k in ('usage', 'resolved_model', 'elapsed_seconds',
+                                               'image_sha256', 'prompt_sha256', 'request_id')}
+        diagnostics.update({'extracted_lines': sorted(confidences), 'expected_lines': [],
+                            'missing_lines': [], 'strategy': 'portkey_full_page'})
+        return payload['records'], diagnostics, candidates
     if client is None and strategy != "row_blocks":
         client = get_client()
     system_prompt, user_prompt = load_prompt(year)
@@ -464,7 +491,7 @@ def process_sheet(image_path: str, year: int, output_path: str,
                   use_crops: bool = True, model: str = DEFAULT_MODEL) -> list[dict]:
     """Extract one sheet and save the canonical JSON envelope."""
     print(f"Extracting: {image_path} (year={year}, model={model})")
-    client = get_client()
+    client = None if model.startswith('@') else get_client()
     records, diagnostics, field_candidates = extract_with_review_data(
         image_path, year, client=client, model=model, use_crops=use_crops
     )

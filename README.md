@@ -1,192 +1,114 @@
-# Census OCR — Proof of Concept
+# Census OCR proof of concept
 
-**Central Texas Spatial Demography Database Project**  
-UT Austin IRP | Bastrop County Census Records (1850–1950)
+Read handwritten Bastrop County census scans through Portkey, retain model
+confidence and raw text, compare drafts against manually cleaned records, and
+review every unresolved field before export.
 
----
+## Analyst workbench
 
-## What This Is
-
-A pipeline that reads scanned, handwritten U.S. Census records and automatically
-extracts structured data (names, race, sex, age, etc.) using a modern vision LLM —
-then measures how accurately it does so compared to human-cleaned records.
-
-**The problem it solves:** Ancestry.com's existing OCR of these records is
-error-prone on 19th–20th century handwriting. This project tests whether a
-frontier vision model can do better.
-
-**Model:** Google **Gemini 3.5 Flash** (`gemini-3.5-flash`) via the API. The local
-workbench reads three row bands concurrently and retains Gemini 3.1 Pro as an
-accuracy-escalation option.
-No GPU and no model download required — extraction is a stateless API call.
-Gemini currently leads independent handwritten-form benchmarks (lowest free-text
-error rate), which is why it is the primary extractor here.
-
----
-
-## How Extraction Works
-
-Each census page is dense (~30 rows), so a single pass tends to drop rows. The
-pipeline maximizes accuracy with:
-
-1. **Full-page pass** — one schema-constrained call for a complete first read.
-2. **Overlapping row-block crops** — the page is split into vertical bands with
-   overlap, each read at higher effective resolution.
-3. **Reconciliation** — results are merged by line number, preferring the
-   clearest, most complete copy of each row and dropping duplicates.
-4. **Targeted retry** — any still-missing line triggers one focused crop retry.
-5. **Normalization** — per-decade race/gender/marital normalization and ditto
-   propagation, producing JSON keyed by the ground-truth column names.
-
-Output is schema-constrained via Pydantic (`response_schema`), so the model
-returns valid JSON directly — no markdown fences or structural drift.
-
----
-
-## Quick Start
-
-```bash
-git clone <repo>
-cd poc_textual
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env        # add your GEMINI_API_KEY
-
-# Extract one sheet (positional args: IMAGE YEAR [OUTPUT] [MODEL] [nocrops])
-python src/extract.py data/raw_images/1950_11-1/sheet_01.jpg 1950 \
-  data/outputs/1950_11-1/sheet_01_extracted.json
-
-# Compare against ground truth.
-# --sheet and --page are both required: a ground-truth workbook sheet
-# concatenates many physical census pages (Line Number resets every ~30 rows),
-# so you must specify which page matches your image. See CLAUDE.md finding #7.
-python src/compare.py --extracted data/outputs/1950_11-1/sheet_01_extracted.json \
-  --ground-truth "data/ground_truth/Bastrop County 1950 Clean.xlsx" \
-  --sheet "Bastrop 11-1" --year 1950 --page 1
-
-# Batch all 11 pages of ED 11-1 (extract + compare + summary)
-python scripts/run_11_1_batch.py
-```
-
-Get a key at https://aistudio.google.com/apikey. Optionally set
-`GEMINI_MODEL` in `.env` to pin a different Gemini model.
-
----
-
-## Project Structure
+Copy `.env.example` to `.env` and configure your own Portkey API key and two
+catalog model routes:
 
 ```
-poc_textual/
-├── CLAUDE.md              ← Full project context for AI coding assistants
-├── IMPLEMENTATION.md      ← Technical implementation details
-├── PROMPTS.md             ← Extraction prompts for each census decade
-├── README.md              ← This file
-├── census_ocr_gemini.ipynb ← Runnable demo notebook (API, no GPU)
-├── data/
-│   ├── raw_images/        ← Census scan JPEGs
-│   ├── ground_truth/      ← Human-cleaned XLSX (do not modify)
-│   └── outputs/           ← Pipeline output JSON
-├── src/
-│   ├── models.py          ← Pydantic extraction contracts + GT column mapping
-│   ├── preprocess.py      ← Full-page prep + overlapping row-block crops
-│   ├── extract.py         ← Gemini client + full extraction pipeline
-│   ├── reconcile.py       ← Merge passes, dedup, missing-line retry, diagnostics
-│   ├── compare.py         ← Accuracy comparison (extracted vs. ground truth)
-│   ├── validate.py        ← Rule-based field validation
-│   └── utils.py           ← Normalization + ditto propagation
-├── scripts/
-│   └── run_11_1_batch.py  ← Batch extract + compare over ED 11-1
-├── tests/                 ← pytest unit tests (mocked Gemini client)
-├── prompts/               ← Decade-specific prompt text files
-├── results/               ← Accuracy reports and summaries
-└── requirements.txt
+PORTKEY_MODEL=@your_anthropic_catalog/claude-opus-5-5
+PORTKEY_COMPARISON_MODEL=@your_openai_catalog/gpt-6-astra
 ```
 
----
+Start the web app and single checkpointing worker:
 
-## Accuracy Metrics
-
-The pipeline compares field-by-field against human-cleaned ground truth:
-
-- **Race accuracy** — exact match required (most important for research)
-- **Sex accuracy** — exact match required
-- **Age accuracy** — ±1 year tolerance
-- **Name accuracy** — fuzzy match (85–90% similarity threshold)
-- **Birthplace accuracy** — fuzzy match
-- **Row accuracy** — all compared fields match for a given person
-- **Extraction coverage** — fraction of expected lines actually extracted
-  (surfaced from the pipeline's reconciliation diagnostics)
-
----
-
-## Testing
-
-```bash
-pip install pytest
-python -m pytest tests/ -q
+```
+docker compose config --quiet
+docker compose up --build -d
 ```
 
-Tests cover structured-response parsing, crop boundaries/overlap, reconciliation
-(dedup, missing lines, targeted retry, out-of-range handling), normalization,
-and API error/retry behavior — all with a mocked Gemini client, so no API key or
-network is needed.
+Open http://127.0.0.1:8000. Import a folder of authorized 1950 scans, confirm page
+order, and identify covers. Choose **Anthropic**, **OpenAI**, or **Both** when
+starting extraction. Both performs an independent read with each model; it does
+not silently replace one provider with another. Use **Compare model drafts** to
+inspect corresponding scan, line and field values. The normal review queue uses
+the latest run with saved candidates; earlier drafts and reviewer decisions are
+preserved. Model agreement and model confidence do not establish correctness.
 
----
+The browser's evidence crops and review schema currently support 1950 only.
+Cross-decade ground-truth tests use the benchmark CLI below. Portkey predictions
+remain subject to human review; Gemini calibration bands cannot authorize them
+for automatic acceptance. Existing Gemini runs and the explicit legacy CLI mode
+remain supported, but new analyst choices are Anthropic and OpenAI only.
 
-## Human Review Workbench (v3)
+See [deployment settings](docs/DEPLOYMENT.md) for health checks, persistent
+storage, secret-file mounting, retry limits, and local setup. This is a local
+single-worker application; a public host needs authentication and TLS.
 
-The local workbench turns a Gemini draft into a field-level review queue. It
-keeps the original scan, extraction run, confidence evidence, reviewer decision
-history, and a versioned export separate from the supplied clean workbooks.
+## Local Python setup
 
-```bash
-# One-time setup
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-export GEMINI_API_KEY=...
-
-# Terminal 1: browser application
-PYTHONPATH=src uvicorn workbench.web:app --reload
-
-# Terminal 2: durable local extraction worker
-PYTHONPATH=src python -m workbench.worker
+```
+python -m venv .venv
+./.venv/Scripts/python.exe -m pip install -r requirements-dev.txt
 ```
 
-Open http://127.0.0.1:8000, import a folder of 1950 images, confirm each page's
-physical order/type, and queue a run. The worker processes only confirmed census
-pages. Reviewers are required to enter a name or initials; every decision is
-append-only. Exports are written under `data/workbench/exports/` as CSV, XLSX,
-JSON, and an audit log.
+On macOS or Linux, use `.venv/bin/python`. Run the web app and worker in separate
+terminals with `PYTHONPATH=src`:
 
-Each run card updates live with queue position, completed/current page, extraction
-pass, API attempt, retry count, elapsed step time, prepared review fields, and a
-recent event log. Every completed page is committed as a checkpoint. If an API
-call exhausts its three automatic retries, the run pauses with its exact error and
-a resume action; if the worker restarts, interrupted runs are automatically
-re-queued and continue from the first unfinished page.
-
-For reproducible local startup, place `GEMINI_API_KEY` in `.env` and run:
-
-```bash
-docker compose up --build
+```
+python -m uvicorn workbench.web:app --host 127.0.0.1 --port 8000
+python -m workbench.worker
 ```
 
-Before high-confidence fields can be auto-accepted, calibrate an extraction on
-held-out cleaned pages. The gate requires at least 30 observations and measured
-precision of 98% or more for a field/confidence band; until then every field
-remains reviewable.
+Provider configuration is shared across web, worker, extractor and benchmark.
+The extractor also accepts an explicit catalog model:
 
-```bash
-PYTHONPATH=src python -m workbench.calibrate \
-  --extracted data/outputs/1950_11-1/sheet_01_extracted.json \
-  --ground-truth "data/ground_truth/Bastrop County 1950 Clean.xlsx" \
-  --sheet "Bastrop 11-1" --page 1 --year 1950
+```
+python src/extract.py IMAGE_PATH 1950 OUTPUT_JSON @your_anthropic_catalog/claude-opus-5-5
 ```
 
----
+Set `CENSUS_PROVIDER=gemini` and `GEMINI_API_KEY` only for the legacy extraction
+CLI. No GPU or downloaded model is required.
 
-## Contact
+## Reproducible ground-truth tests
 
-Damodar — SDE Intern, UT Austin IRP  
-Supervisor: Mia (Textual Database / infra)  
-Project Lead: Jaden
+Use [the Portkey workflow](PORTKEY_WORKFLOW.md) and the portable
+[teammate skill](skills/census-ground-test/SKILL.md). The teammate supplies years,
+a batch ZIP, or a scan folder. Codex handles the plan and verifies image-to-Excel
+alignment, then runs both configured models and delivers the granular XLSX and
+evidence ZIP. The default sample is three scans per year; request the full batch
+explicitly to test every supplied scan. Their own Portkey key and catalog routes
+are configured once with `python scripts/census_ground_test.py configure`.
+
+```
+python scripts/census_ground_test.py prepare --years 1880 1910 --output results/my-test
+python scripts/census_ground_test.py run results/my-test/plan.json --output results/my-test
+```
+
+Verify the plan's page alignment and select the requested pages before adding
+`--execute`. Example configs use generic catalog names; regenerate them with
+`prepare` or replace those names with your own. Exact, previously reviewed image
+and workbook hashes reuse saved mappings; Codex verifies unfamiliar scans.
+These tests require locally available
+images and cleaned workbooks; private keys and new downloads are not committed.
+
+```
+python scripts/census_ground_test.py finish results/my-test/plan.json --output results/my-test --node NODE_PATH
+```
+
+The [workbook reading guide](docs/WORKBOOK_GUIDE.md) explains denominators,
+confidence, fuzzy matching, discrepancies and limitations. A
+[Word copy](docs/census-workbook-reading-guide.docx) is included. These are pilot
+agreement tests, not validated forecasts for uncleaned districts. The 1860
+workbooks lack line numbers and require household alignment. Some other decades
+need explicit reference-row ranges because numbering continues across scans.
+
+Raw extraction JSON, CSV ledgers, hashes and source coordinates are preserved.
+An optional Codex artifact-tool exporter creates the Excel review workbook;
+CSV/JSON analysis needs only the Python dependencies. Credentials, reports and
+newly downloaded source scans remain outside source control and container images.
+
+## Validation
+
+```
+python -m pytest -q
+docker compose config --quiet
+docker build -t census-ocr:test .
+```
+
+Tests use mocked provider responses and an isolated database; they do not make
+paid inference requests. GitHub Actions runs the tests and container build.

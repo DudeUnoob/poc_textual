@@ -112,6 +112,13 @@ def classify_failure(error: str | None) -> dict | None:
     if not error:
         return None
     lowered = error.casefold()
+    if 'portkey' in lowered:
+        kind = ('billing' if 'http 402' in lowered else 'credentials' if any(x in lowered for x in ('http 401','http 403','api_key','not configured'))
+                else 'rate_limit' if '429' in lowered else 'network' if 'network' in lowered or 'timeout' in lowered else 'provider_error')
+        return {'kind':kind,'message':'Portkey extraction paused.',
+                'action_required':('Check the Portkey API key and catalog permissions, restart the worker and resume.' if kind=='credentials' else
+                                   'Check the Portkey workspace billing or quota, then resume.' if kind in ('billing','rate_limit') else
+                                   'Check the Portkey failure details and connection, then resume. Completed pages are preserved.')}
     if "prepayment credits are depleted" in lowered:
         return {
             "kind": "billing",
@@ -155,7 +162,7 @@ def _default_message(status: str, queue_position: int | None) -> str:
     if status == "running":
         return "Extraction is running"
     if status == "cancel_requested":
-        return "Finishing the current API call, then switching to fast extraction"
+        return "Finishing the current API call, then stopping safely"
     if status == "completed":
         return "Extraction completed"
     if status == "failed":

@@ -14,6 +14,8 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from PIL import Image
+from sqlalchemy import text
+from provider_config import get_provider_config, require_credentials
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
@@ -26,19 +28,21 @@ from .services import (QUEUE_STATUSES, apply_decision, batch_ready, create_expor
 
 TEMPLATES = Jinja2Templates(directory=str(__file__.replace("web.py", "templates")))
 STATIC_DIR = __file__.replace("web.py", "static")
-DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+DEFAULT_MODEL = get_provider_config().portkey_model
 
 
-def extraction_config(total_pages: int) -> dict:
+def extraction_config(total_pages: int, model: str | None = None) -> dict:
     timestamp = now_iso()
+    selected = model or DEFAULT_MODEL
     return {
-        "use_crops": True, "expected_lines": 30,
-        "strategy": "row_blocks", "n_blocks": 3, "parallelism": 3,
+        **get_provider_config().snapshot(selected),
+        "use_crops": not selected.startswith('@'), "expected_lines": 30,
+        "n_blocks": 3, "parallelism": 3,
         "progress": {
             "phase": "queued", "message": "Waiting for the local extraction worker",
             "total_pages": total_pages, "completed_pages": 0,
             "retry_count": 0, "job_attempt": 0, "last_update": timestamp,
-            "events": [{"type": "run_queued", "message": "Fast row-band run added to the worker queue", "at": timestamp}],
+            "events": [{"type": "run_queued", "message": "Extraction run added to the worker queue", "at": timestamp}],
         },
     }
 
@@ -51,6 +55,13 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Census Review Workbench", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get('/healthz')
+def health():
+    with SessionLocal() as session:
+        session.execute(text('SELECT 1'))
+    return {'status':'ok'}
 
 
 def db_session():
@@ -163,6 +174,35 @@ def batch_detail(request: Request, batch_id: int):
         return TEMPLATES.TemplateResponse(request, "batch.html", {"batch": batch, "ready": ready, "reason": reason, "runs": runs, "run_snapshots": run_snapshots, "queue_count": queue_count, "row_count": row_count})
 
 
+@app.get('/batches/{batch_id}/models')
+def compare_model_drafts(request: Request, batch_id: int, page: int = 1):
+    if page < 1:
+        raise HTTPException(status_code=400, detail='Page must be positive')
+    settings = get_provider_config()
+    models = [settings.portkey_model, settings.comparison_model]
+    with SessionLocal() as session:
+        batch = session.get(Batch, batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail='Batch not found')
+        latest = [session.scalar(select(ExtractionRun).where(ExtractionRun.batch_id==batch_id,
+                  ExtractionRun.model==model).order_by(ExtractionRun.id.desc())) for model in models]
+        grouped = {}
+        for idx, run in enumerate(latest):
+            if not run:
+                continue
+            candidates = session.scalars(select(FieldCandidate).where(FieldCandidate.run_id==run.id)
+                         .options(joinedload(FieldCandidate.page))).all()
+            for candidate in candidates:
+                key=(candidate.page_id,candidate.line_number,candidate.field_name)
+                row=grouped.setdefault(key,{'page_number':candidate.page.page_number,'page_id':candidate.page_id,
+                    'line':candidate.line_number,'field':candidate.field_name,'primary':None,'comparison':None})
+                row['primary' if idx==0 else 'comparison']=candidate
+        rows=sorted(grouped.values(),key=lambda r:(r['page_number'] or 0,r['line'],r['field']))
+        total=len(rows)
+        return TEMPLATES.TemplateResponse(request,'model_comparison.html',{'batch':batch,'models':models,
+            'runs':latest,'rows':rows[(page-1)*100:page*100],'page':page,'total':total,'has_next':page*100<total})
+
+
 @app.post("/pages/{page_id}/manifest")
 def confirm_page(page_id: int, page_number: str | None = Form(None), kind: str = Form(...)):
     try:
@@ -197,7 +237,20 @@ def remove_import_error(page_id: int):
 
 
 @app.post("/batches/{batch_id}/runs")
-def queue_run(batch_id: int):
+def queue_run(batch_id: int, model_choice: str = Form('primary')):
+    settings = get_provider_config()
+    choices = {'primary':[settings.portkey_model], 'comparison':[settings.comparison_model],
+               'both':[settings.portkey_model,settings.comparison_model]}
+    if model_choice not in choices:
+        raise HTTPException(status_code=400, detail='Choose primary, comparison or both models')
+    selected_models=choices[model_choice]
+    if len(set(selected_models))!=len(selected_models):
+        raise HTTPException(status_code=400, detail='Comparison requires two distinct configured models')
+    try:
+        for model in selected_models:
+            require_credentials(model)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     with SessionLocal() as session:
         batch = session.scalar(select(Batch).where(Batch.id == batch_id).options(joinedload(Batch.pages)))
         if not batch:
@@ -206,11 +259,10 @@ def queue_run(batch_id: int):
         if not ready:
             raise HTTPException(status_code=400, detail=reason)
         total_pages = sum(1 for page in batch.pages if page.kind == "census")
-        run = ExtractionRun(
-            batch_id=batch.id, model=DEFAULT_MODEL,
-            config=extraction_config(total_pages),
-        )
-        session.add(run)
+        for model in selected_models:
+            session.add(ExtractionRun(batch_id=batch.id, model=model,
+                prompt_version=settings.snapshot(model)['prompt_version'],
+                config=extraction_config(total_pages,model)))
         session.commit()
         return RedirectResponse(f"/batches/{batch.id}", status_code=303)
 
@@ -237,6 +289,8 @@ def resume_run(run_id: int):
 @app.post("/runs/{run_id}/switch-to-fast")
 def switch_to_fast_run(run_id: int):
     """Preserve the old audit run and queue a calibrated low-latency extraction."""
+    if DEFAULT_MODEL.startswith('@'):
+        raise HTTPException(status_code=400, detail='Fast Gemini switching is unavailable in Portkey mode. Start a new configured run instead.')
     with SessionLocal() as session:
         run = session.get(ExtractionRun, run_id)
         if not run:
