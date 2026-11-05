@@ -56,3 +56,13 @@ def test_evidence_package_checks_credentials_inside_compressed_office_files(tmp_
     with pytest.raises(ValueError, match='credential detected'):
         package(audit_path, tmp_path / 'unsafe.zip', workbook)
     assert not (tmp_path / 'unsafe.zip').exists()
+
+
+def test_portkey_model_ids_are_provenance_rather_than_api_credentials(tmp_path, monkeypatch):
+    import package_census_audit as packager
+    audit_path, image, truth, response = fixture_audit(tmp_path)
+    monkeypatch.setattr(packager, 'dotenv_values', lambda *a: {
+        'PORTKEY_MODEL': '@catalog/claude-test', 'PORTKEY_API_KEY': 'unused-test-key'})
+    package(audit_path, tmp_path / 'evidence.zip')
+    with zipfile.ZipFile(tmp_path / 'evidence.zip') as z:
+        assert '@catalog/claude-test' in z.read('run_plan.json').decode()

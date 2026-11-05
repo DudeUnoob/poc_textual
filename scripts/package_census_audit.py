@@ -78,19 +78,21 @@ def package(audit_path, destination, workbook=None):
         return translations.get(value, value) if isinstance(value, str) else value
 
     values = dotenv_values(ROOT / '.env')
-    secrets = [v.encode() for k, v in values.items() if v and any(s in k for s in ('KEY', 'TOKEN', 'SECRET'))]
+    # PORTKEY is a provider name: its KEY substring does not make model IDs secrets.
+    secrets = [v.encode() for k, v in values.items()
+               if v and k.upper().endswith(('_KEY', '_TOKEN', '_SECRET', '_PASSWORD'))]
     for key in ('PORTKEY_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'):
         value = credential(key)
         if value:
             secrets.append(value.encode())
 
-    def check(data):
+    def check(data, name='input'):
         chunks = [data]
         if data[:4] == b'PK\x03\x04':
             with zipfile.ZipFile(io.BytesIO(data)) as nested:
                 chunks.extend(nested.read(n) for n in nested.namelist())
         if any(secret in chunk for secret in secrets for chunk in chunks):
-            raise ValueError('Configured credential detected in package input')
+            raise ValueError('Configured credential detected in package input: ' + name)
 
     contents = {}
     for name, path in sorted(files.items()):
@@ -105,7 +107,7 @@ def package(audit_path, destination, workbook=None):
             data = out.getvalue().encode('utf-8-sig')
         else:
             data = path.read_bytes()
-        check(data)
+        check(data, name)
         contents[name] = data
     # This is the runnable plan after unpacking, independent of either user's path.
     contents['run_plan.json'] = json.dumps(rewrite(audit['plan']), indent=2).encode()
