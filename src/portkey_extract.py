@@ -54,13 +54,23 @@ def request_json(endpoint, payload=None, provider=None, event_callback=None, sou
             time.sleep(delay)
 
 
+def encode_under_limit(image, max_raw_bytes=7_000_000):
+    # Shrink a page until its JPEG fits under the gateway image limit.
+    for edge, quality in [(6000, 95), (6000, 90), (5000, 90), (4000, 88), (3200, 85)]:
+        img = image.copy()
+        img.thumbnail((edge, edge))
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=quality, optimize=True)
+        if buf.tell() <= max_raw_bytes:
+            return buf.getvalue(), (edge, quality)
+    raise RuntimeError('Image cannot be compressed under the size limit')
+
+
 def extract(image_path, year, fields, model=DEFAULT_MODEL, event_callback=None):
     """One full page. No GT values are sent to the model; only the field schema."""
     original = Path(image_path).read_bytes()
     image = Image.open(io.BytesIO(original)).convert('RGB')
-    image.thumbnail((6000, 6000))
-    buf = io.BytesIO()
-    image.save(buf, format='JPEG', quality=95)
+    jpeg_bytes, (edge, quality) = encode_under_limit(image)
     schema = {field: None for field in ['Line Number', *fields]}
     prompt = (
         f'Transcribe this {year} Bastrop County, Texas population census page. '
@@ -86,7 +96,7 @@ def extract(image_path, year, fields, model=DEFAULT_MODEL, event_callback=None):
         {'role': 'system', 'content': 'You transcribe historical census handwriting faithfully.'},
         {'role': 'user', 'content': [
             {'type': 'text', 'text': prompt},
-            {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()}}
+            {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + base64.b64encode(jpeg_bytes).decode()}}
         ]}]}
     if model.split('/')[-1].startswith(('gpt-5', 'gpt-6', 'o1', 'o3', 'o4')):
         payload['max_completion_tokens'] = payload.pop('max_tokens')
