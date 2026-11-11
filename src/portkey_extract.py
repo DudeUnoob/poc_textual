@@ -71,6 +71,7 @@ def extract(image_path, year, fields, model=DEFAULT_MODEL, event_callback=None):
     original = Path(image_path).read_bytes()
     image = Image.open(io.BytesIO(original)).convert('RGB')
     jpeg_bytes, (edge, quality) = encode_under_limit(image)
+    sent_size = list(Image.open(io.BytesIO(jpeg_bytes)).size)
     schema = {field: None for field in ['Line Number', *fields]}
     prompt = (
         f'Transcribe this {year} Bastrop County, Texas population census page. '
@@ -151,4 +152,6 @@ def extract(image_path, year, fields, model=DEFAULT_MODEL, event_callback=None):
             'image_sha256': hashlib.sha256(original).hexdigest(),
             'prompt_sha256': hashlib.sha256(prompt.encode()).hexdigest(),
             'request_id': headers.get('x-portkey-trace-id') or response.get('id'),
-            'input_image_size': list(image.size), 'pipeline_version': 2}
+            'input_image_size': sent_size,
+            'compression': {'max_edge': edge, 'quality': quality, 'original_size': list(image.size), 'sent_bytes': len(jpeg_bytes)},
+            'pipeline_version': 2}

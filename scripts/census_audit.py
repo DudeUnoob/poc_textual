@@ -79,7 +79,7 @@ def build(report):
         scan_provenance.append({'job':summary['job'],'year':summary['year'],'model':summary['model'],
             'resolved_model':payload.get('resolved_model'),'request_id':payload.get('request_id'),
             'image_sha256':payload['image_sha256'],'prompt_sha256':payload['prompt_sha256'],
-            'input_image_size':payload.get('input_image_size'),'pipeline_version':payload.get('pipeline_version'),
+            'input_image_size':payload.get('input_image_size'),'compression':payload.get('compression'),'pipeline_version':payload.get('pipeline_version'),
             'image':summary['image']})
     cells=[]
     for original in report['cells']:
